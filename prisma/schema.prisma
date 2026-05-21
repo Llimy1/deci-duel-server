@@ -10,3 +10,41 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+model User {
+  id           Int      @id @default(autoincrement())
+  devId        String   @map("dev_id")
+  devPassword  String   @map("dev_password")
+  nickname     String   @unique
+  authProvider String   @map("auth_provider")
+  refreshToken String?  @map("refresh_token")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now())
+
+  soloRecords  SoloRecord[]
+  diaryRecords DiaryRecord[]
+}
+
+model SoloRecord {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  user      User     @relation(fields: [userId], references: [id])
+  peakDb    Float
+  bestDb    Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+}
+
+model DiaryRecord {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  peakDb    Float
+  emoji     String
+  comment   String?
+  date      DateTime @db.Date
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  @@unique([userId, date])
+}
