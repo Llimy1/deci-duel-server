@@ -61,8 +61,12 @@ export class AuthService {
     return new RefreshResponse(tokens.accessToken, tokens.refreshToken, user);
   }
 
+  async logout(userId: number): Promise<void> {
+    await this.userRepository.updateRefreshToken(userId, null);
+  }
+
   generateTokens(userId: number, nickname: string) {
-    const accessToken = this.jwtService.sign({ sub: userId, nickname }, { expiresIn: '7d' });
+    const accessToken = this.jwtService.sign({ sub: userId, nickname }, { expiresIn: '15m' });
 
     const refreshToken = this.jwtService.sign({ sub: userId }, { expiresIn: '30d' });
 

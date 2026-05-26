@@ -1,9 +1,11 @@
-import { Body, Controller, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { DevLoginRequest, DevSignupRequest, RefreshRequest } from './dto/request/auth.request';
 import { ApiResponse } from '../common/dto/api-response.dto';
 import { DevLoginResponse, DevSignupResponse, RefreshResponse } from './dto/response/auth.response';
 import { AuthResponseMessage } from '../common/enum/reponse-message.enum';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import * as authRequestInterface from '../common/interfaces/auth-request.interface';
 
 @Controller('auth')
 export class AuthController {
@@ -28,5 +30,13 @@ export class AuthController {
     const result = await this.authService.refresh(refreshRequest);
 
     return new ApiResponse(HttpStatus.OK, AuthResponseMessage.REFRESH_SUCCESS, result);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('logout')
+  async logout(@Req() req: authRequestInterface.AuthRequest): Promise<ApiResponse<null>> {
+    await this.authService.logout(req.user.userId);
+
+    return new ApiResponse(HttpStatus.OK, AuthResponseMessage.LOGOUT_SUCCESS, null);
   }
 }

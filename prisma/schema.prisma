@@ -18,6 +18,11 @@ model User {
   nickname     String   @unique
   authProvider String   @map("auth_provider")
   refreshToken String?  @map("refresh_token")
+  avatarColor     String   @default("#ff2d87") @map("avatar_color")
+  profileImageKey String?  @map("profile_image_key")
+  streak          Int      @default(0)
+  wins            Int      @default(0)
+  losses          Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @default(now())
 
