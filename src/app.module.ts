@@ -7,6 +7,7 @@ import { UserModule } from './user/user.module';
 import { AuthModule } from './auth/auth.module';
 import { SoloRecordModule } from './record/solo/solo-record.module';
 import { DiaryModule } from './diary/diary.module';
+import { GameModule } from './game/game.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { DiaryModule } from './diary/diary.module';
     AuthModule,
     SoloRecordModule,
     DiaryModule,
+    GameModule,
   ],
   controllers: [AppController],
   providers: [AppService],

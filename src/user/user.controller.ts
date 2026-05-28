@@ -1,5 +1,6 @@
 import {
-  Body, Controller, Delete, Get, HttpStatus,
+  BadRequestException,
+  Body, Controller, Delete, Get, HttpCode, HttpStatus,
   Patch, Post, Query, Req, UploadedFile,
   UseGuards, UseInterceptors,
 } from '@nestjs/common';
@@ -39,12 +40,13 @@ export class UserController {
 
   @UseGuards(JwtAuthGuard)
   @Post('me/profile-image')
+  @HttpCode(HttpStatus.OK)
   @UseInterceptors(FileInterceptor('image', { limits: { fileSize: 5 * 1024 * 1024 } }))
   async uploadProfileImage(
     @Req() req: authRequestInterface.AuthRequest,
     @UploadedFile() file: Express.Multer.File | undefined,
   ): Promise<ApiResponse<UpdateProfileImageResponse>> {
-    if (!file) throw new Error('이미지 파일이 필요합니다.');
+    if (!file) throw new BadRequestException('이미지 파일이 필요합니다.');
     const result = await this.userService.uploadProfileImage(req.user.userId, file);
     return new ApiResponse(HttpStatus.OK, UserResponseMessage.PROFILE_IMAGE_UPDATE_SUCCESS, result);
   }

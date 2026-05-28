@@ -1,4 +1,4 @@
-import { Body, Controller, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { DevLoginRequest, DevSignupRequest, RefreshRequest } from './dto/request/auth.request';
 import { ApiResponse } from '../common/dto/api-response.dto';
@@ -19,6 +19,7 @@ export class AuthController {
   }
 
   @Post('dev/login')
+  @HttpCode(HttpStatus.OK)
   async devLogin(@Body() devLoginRequest: DevLoginRequest): Promise<ApiResponse<DevLoginResponse>> {
     const result = await this.authService.devLogin(devLoginRequest);
 
@@ -26,6 +27,7 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @HttpCode(HttpStatus.OK)
   async refresh(@Body() refreshRequest: RefreshRequest): Promise<ApiResponse<RefreshResponse>> {
     const result = await this.authService.refresh(refreshRequest);
 
@@ -34,6 +36,7 @@ export class AuthController {
 
   @UseGuards(JwtAuthGuard)
   @Post('logout')
+  @HttpCode(HttpStatus.OK)
   async logout(@Req() req: authRequestInterface.AuthRequest): Promise<ApiResponse<null>> {
     await this.authService.logout(req.user.userId);
 

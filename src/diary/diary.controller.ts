@@ -16,6 +16,7 @@ import * as authRequestInterface from '../common/interfaces/auth-request.interfa
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateDiaryRequest, UpdateDiaryRequest } from './dto/request/diary.request';
 import { ApiResponse } from '../common/dto/api-response.dto';
+import { BadRequestException } from '../common/exception/custom.exception';
 import {
   CreateDiaryResponse,
   DeleteDiaryResponse,
@@ -48,7 +49,18 @@ export class DiaryController {
     @Query('month') month: string,
   ): Promise<ApiResponse<FindMonthlyDiaryResponse>> {
     const userId = req.user.userId;
-    const result = await this.diaryService.findMonthlyDiary(userId, Number(year), Number(month));
+    const yearNum = Number(year);
+    const monthNum = Number(month);
+    if (!year || !month || isNaN(yearNum) || isNaN(monthNum)) {
+      throw new BadRequestException('year, month 쿼리 파라미터가 필요합니다.');
+    }
+    if (monthNum < 1 || monthNum > 12) {
+      throw new BadRequestException('month는 1~12 사이의 값이어야 합니다.');
+    }
+    if (yearNum < 2000 || yearNum > 2100) {
+      throw new BadRequestException('year는 2000~2100 사이의 값이어야 합니다.');
+    }
+    const result = await this.diaryService.findMonthlyDiary(userId, yearNum, monthNum);
     return new ApiResponse(HttpStatus.OK, DiaryResponseMessage.DIARY_MONTHLY_SUCCESS, result);
   }
 
@@ -58,6 +70,7 @@ export class DiaryController {
     @Req() req: authRequestInterface.AuthRequest,
     @Param('date') date: string,
   ): Promise<ApiResponse<FindDiaryByDateResponse>> {
+    validateDateParam(date);
     const userId = req.user.userId;
     const result = await this.diaryService.findDiaryByDate(userId, date);
     return new ApiResponse(HttpStatus.OK, DiaryResponseMessage.DIARY_DATE_SUCCESS, result);
@@ -70,6 +83,7 @@ export class DiaryController {
     @Param('date') date: string,
     @Body() dto: UpdateDiaryRequest,
   ): Promise<ApiResponse<UpdateDiaryResponse>> {
+    validateDateParam(date);
     const userId = req.user.userId;
     const result = await this.diaryService.updateDiary(userId, date, dto);
     return new ApiResponse(HttpStatus.OK, DiaryResponseMessage.DIARY_UPDATE_SUCCESS, result);
@@ -81,8 +95,16 @@ export class DiaryController {
     @Req() req: authRequestInterface.AuthRequest,
     @Param('date') date: string,
   ): Promise<ApiResponse<DeleteDiaryResponse>> {
+    validateDateParam(date);
     const userId = req.user.userId;
     const result = await this.diaryService.deleteDiary(userId, date);
     return new ApiResponse(HttpStatus.OK, DiaryResponseMessage.DIARY_DELETE_SUCCESS, result);
+  }
+}
+
+/** YYYY-MM-DD 형식 검증 */
+function validateDateParam(date: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new BadRequestException('날짜 형식은 YYYY-MM-DD여야 합니다.');
   }
 }

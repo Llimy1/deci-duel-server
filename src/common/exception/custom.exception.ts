@@ -23,3 +23,9 @@ export class ConflictException extends HttpException {
     super(message, HttpStatus.CONFLICT);
   }
 }
+
+export class InternalServerErrorException extends HttpException {
+  constructor(message = '서버 오류가 발생했습니다.') {
+    super(message, HttpStatus.INTERNAL_SERVER_ERROR);
+  }
+}

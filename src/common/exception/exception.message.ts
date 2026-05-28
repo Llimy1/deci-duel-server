@@ -18,3 +18,7 @@ export enum UserExceptionMessage {
 export enum DiaryExceptionMessage {
   DIARY_NOT_FOUND = '해당 날짜의 다이어리 기록이 없습니다.',
 }
+
+export enum CommonExceptionMessage {
+  INTERNAL_SERVER_ERROR = '서버 오류가 발생했습니다.',
+}

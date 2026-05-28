@@ -1,0 +1,39 @@
+export type GameState =
+  | 'waiting'    // room created, waiting for 2nd player
+  | 'ready'      // 2 players joined, waiting for both to press ready
+  | 'countdown'  // 3-2-1 countdown in progress
+  | 'playing'    // round in progress, accepting submissions
+  | 'round_end'  // round resolved, brief pause before next round
+  | 'game_over'; // game finished
+
+export interface PlayerInfo {
+  userId: number;
+  nickname: string;
+  socketId: string;
+  avatarColor: string;
+  isReady: boolean;
+  connected: boolean;
+  /** peakDb submitted per round: { [round]: dB } */
+  roundSubmissions: Record<number, number>;
+  disconnectTimer: ReturnType<typeof setTimeout> | null;
+}
+
+export interface RoundRecord {
+  round: number;
+  submissions: Record<number, number>; // userId → peakDb
+}
+
+export interface GameRoom {
+  roomCode: string;
+  /** userId → PlayerInfo */
+  players: Map<number, PlayerInfo>;
+  state: GameState;
+  currentRound: number;
+  totalRounds: number;       // fixed: 3
+  roundDurationMs: number;   // fixed: 5500 (5.5 s)
+  /** userId → round-win count in this game */
+  scores: Map<number, number>;
+  roundRecords: RoundRecord[];
+  roundTimer: ReturnType<typeof setTimeout> | null;
+  createdAt: Date;
+}

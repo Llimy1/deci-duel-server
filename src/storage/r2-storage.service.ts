@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -9,6 +9,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 @Injectable()
 export class R2StorageService {
+  private readonly logger = new Logger(R2StorageService.name);
   private readonly accountId = process.env.R2_ACCOUNT_ID;
   private readonly bucketName = process.env.R2_BUCKET_NAME;
   private readonly accessKeyId = process.env.R2_ACCESS_KEY_ID;
@@ -21,36 +22,48 @@ export class R2StorageService {
 
   async uploadObject(key: string, body: Buffer, contentType: string): Promise<void> {
     const client = this.getClient();
-
-    await client.send(
-      new PutObjectCommand({
-        Bucket: this.bucketName!,
-        Key: key,
-        Body: body,
-        ContentType: contentType,
-      }),
-    );
+    try {
+      await client.send(
+        new PutObjectCommand({
+          Bucket: this.bucketName!,
+          Key: key,
+          Body: body,
+          ContentType: contentType,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`R2 uploadObject 실패 [key=${key}]`, err);
+      throw new InternalServerErrorException('파일 업로드에 실패했습니다.');
+    }
   }
 
   async deleteObject(key: string): Promise<void> {
     const client = this.getClient();
-
-    await client.send(
-      new DeleteObjectCommand({
-        Bucket: this.bucketName!,
-        Key: key,
-      }),
-    );
+    try {
+      await client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucketName!,
+          Key: key,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`R2 deleteObject 실패 [key=${key}]`, err);
+      throw new InternalServerErrorException('파일 삭제에 실패했습니다.');
+    }
   }
 
   async getSignedDownloadUrl(key: string, expiresInSeconds = 60 * 60): Promise<string> {
     const client = this.getClient();
-
-    return getSignedUrl(
-      client,
-      new GetObjectCommand({ Bucket: this.bucketName!, Key: key }),
-      { expiresIn: expiresInSeconds },
-    );
+    try {
+      return await getSignedUrl(
+        client,
+        new GetObjectCommand({ Bucket: this.bucketName!, Key: key }),
+        { expiresIn: expiresInSeconds },
+      );
+    } catch (err) {
+      this.logger.error(`R2 getSignedDownloadUrl 실패 [key=${key}]`, err);
+      throw new InternalServerErrorException('파일 URL 생성에 실패했습니다.');
+    }
   }
 
   private getClient(): S3Client {
