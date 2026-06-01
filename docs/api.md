@@ -340,6 +340,147 @@
 
 ---
 
+## WebSocket — 대결 게임 (Game)
+
+### 연결
+
+```
+namespace : /game
+transport : websocket
+auth      : { token: "<accessToken>" }   // JWT — 핸드셰이크 시 검증
+```
+
+연결 시 JWT 검증 실패(만료·위조·토큰 없음)는 즉시 `disconnect`.
+
+---
+
+### 상태 머신
+
+```
+waiting → ready → countdown → playing → round_end ┐
+                                    ↑              │ 마지막 라운드
+                                    └──────────────┘
+                                               ↓
+                                          game_over ←→ rematch_waiting
+```
+
+---
+
+### Client → Server
+
+| 이벤트 | payload | 설명 |
+|--------|---------|------|
+| `room:create` | _(없음)_ | 새 방 생성. 방 코드 발급. |
+| `room:join` | `{ roomCode: string }` | 방 입장. `waiting` 상태만 허용 (대소문자 무관). `game_over`/`rematch_waiting`에서도 disconnected 슬롯이 있으면 3자 입장 가능. |
+| `game:ready` | _(없음)_ | 준비 완료 선언. 양쪽 모두 ready이면 카운트다운 시작. |
+| `round:submit` | `{ round: number; peakDb: number }` | 라운드 피크 dB 제출. 범위 clamp: 0–200. |
+| `round:db` | `{ round: number; db: number }` | 측정 중 실시간 dB 스트림. 상대에게 `opponent:db` 전달. `playing` 상태만 처리. |
+| `game:rematch` | _(없음)_ | 재대결 요청. `game_over` 또는 `rematch_waiting` 상태에서만 가능. |
+| `room:leave` | _(없음)_ | 명시적 방 나가기. 네트워크 disconnect와 다르게 즉시 슬롯 해제. 활성 게임 중이면 즉시 forfeit 처리. |
+
+---
+
+### Server → Client
+
+#### 방 관리
+
+| 이벤트 | payload | 시점 |
+|--------|---------|------|
+| `room:created` | `{ roomCode: string }` | `room:create` 성공 |
+| `room:joined` | `{ roomCode: string; isHost: boolean; opponent: { userId, nickname, avatarColor, bestDb, profileImageUrl: string\|null } }` | `room:join` 성공 |
+| `opponent:joined` | `{ userId, nickname, avatarColor, bestDb, profileImageUrl: string\|null, isHost: boolean }` | 상대방이 방에 입장 |
+| `room:reconnected` | `{ roomCode, isHost, myScore, oppScore, roundResults: [{round, myDb, oppDb}], opponent: { userId, nickname, avatarColor, profileImageUrl: string\|null, bestDb } \| null }` | 재연결 시 내 소켓에게 |
+
+#### 준비
+
+| 이벤트 | payload | 시점 |
+|--------|---------|------|
+| `opponent:ready` | `{}` | 상대방이 `game:ready` 전송 시 |
+
+#### 게임 진행
+
+| 이벤트 | payload | 시점 |
+|--------|---------|------|
+| `round:countdown` | `{ count: number }` | 3→2→1→0, 1초 간격 |
+| `round:start` | `{ round: number }` | 라운드 시작 (measuring 시작) |
+| `opponent:db` | `{ round: number; db: number }` | 상대방의 실시간 dB (0–200) |
+| `round:result` | `{ round, myDb, oppDb, roundResult: 'win'|'lose'|'draw', myScore, oppScore }` | 라운드 종료 |
+| `game:over` | `{ result: 'win'|'lose'|'draw', myScore, oppScore, rounds: [{round, myDb, oppDb}], forfeit?: true }` | 게임 종료 |
+
+#### 재대결
+
+| 이벤트 | payload | 시점 |
+|--------|---------|------|
+| `rematch:waiting` | `{ roomCode: string }` | 내가 `game:rematch` 전송 후 상대 대기 중 (상대는 별도 알림 없음) |
+| `rematch:matched` | `{ roomCode: string }` | 양쪽 모두 재대결 수락 → 방 전체 broadcast, 게임 리셋 후 `ready` 상태로 |
+
+#### 연결 상태
+
+| 이벤트 | payload | 시점 |
+|--------|---------|------|
+| `opponent:disconnected` | `{ waitSecs: number }` | 상대 연결 끊김. 활성 게임 중(`countdown`/`playing`/`round_end`)이면 `waitSecs: 10` (forfeit 대기). 그 외 상태는 `waitSecs: 0`. |
+| `opponent:reconnected` | _(payload 없음)_ | 상대방이 10초 내 재연결 |
+| `opponent:left` | `{}` | 상대방이 `room:leave`로 명시적으로 나감. 방은 `waiting` 상태로 전환됨. |
+
+#### 에러
+
+| 이벤트 | payload |
+|--------|---------|
+| `error` | `{ message: string }` |
+
+---
+
+### 타이머 / 정책
+
+| 항목 | 값 |
+|------|----|
+| 라운드 서버 하드 타임아웃 | 5.5초 |
+| Forfeit grace period (활성 게임 중 disconnect) | **10초** |
+| 방 TTL (game_over / rematch_waiting 후 자동 정리) | **10분** |
+| waiting 상태 단독 disconnect | 즉시 방 삭제 |
+
+---
+
+## 리더보드 (Leaderboard)
+
+### GET `/leaderboard/global`
+
+**인증**: Bearer 필요
+
+**Response 200**
+```ts
+{
+  statusCode: 200,
+  message: "글로벌 리더보드 조회에 성공했습니다.",
+  data: {
+    entries: Array<{
+      rank: number;                  // 1부터 시작
+      userId: number;
+      nickname: string;
+      avatarColor: string;           // "#RRGGBB"
+      bestDb: number;                // float64 전체 정밀도
+      profileImageUrl: string | null; // R2 서명 URL (1시간 유효). 이미지 없으면 null
+    }>;                              // 최대 50개, bestDb DESC 정렬 (기록 있는 유저 먼저, 이후 기록 없는 유저 id ASC)
+    myEntry: {
+      rank: number;
+      userId: number;
+      nickname: string;
+      avatarColor: string;
+      bestDb: number;                // 기록 없으면 0
+      profileImageUrl: string | null;
+    };                               // 항상 반환 (기록 없어도 null 아님. bestDb: 0으로 순위 포함)
+  }
+}
+```
+
+> **정렬 기준**: 기록 있는 유저 `SoloRecord.bestDb DESC` → 기록 없는 유저 `User.id ASC` 순으로 이어붙임 (full float64 정밀도)
+> **순위 계산**: ROW_NUMBER (dense_rank 아님). 동점 처리 없음 — 동일 bestDb라도 순위 다름.
+> **myEntry**: 항상 반환. 기록 없는 유저는 `bestDb: 0`, 순위는 `기록보유 유저 수 + id 기준 앞선 무기록 유저 수 + 1`.
+> **페이지네이션**: 없음. TOP_N=50 고정 반환. 추후 무한스크롤 추가 시 limit/offset 파라미터로 확장 예정.
+> **profileImageUrl**: `R2StorageService.getSignedDownloadUrl(key)` 를 병렬 호출해 생성. 개별 URL 실패 시 해당 항목만 null 처리 (전체 응답 실패로 이어지지 않음). 서명 URL 유효기간 1시간.
+
+---
+
 ## 변경 이력
 
 | 날짜 | 변경 | 작성자 |
@@ -349,3 +490,8 @@
 | 2026-05-21 | `POST /auth/logout`, `PATCH /user/me/nickname`, `PATCH /user/me/avatar-color`, `DELETE /user/me` 구현 완료 | Claude |
 | 2026-05-21 | `POST /user/me/profile-image` (R2 업로드), `GET /user/me`에 `profileImageUrl` 추가. User 스키마 마이그레이션 | Claude |
 | 2026-05-21 | 프로필 이미지 저장 방식 변경: 공개 URL → 키 저장 + 서명 URL (1시간 유효). 퍼블릭 버킷 불필요. | Claude |
+| 2026-05-28 | WebSocket `/game` 섹션 추가. 신규: `round:db`/`opponent:db`, `game:rematch`/`rematch:*`. `bestDb` 추가됨 (`room:joined`, `opponent:joined`). forfeit 대기 10초로 연장. 방 TTL 10분. | Claude |
+| 2026-05-28 | `room:leave` 추가 (명시적 이탈). `opponent:left` 추가. `opponent:rematch-requested` 제거. | Claude |
+| 2026-05-28 | `GET /leaderboard/global` 추가. LeaderboardModule 신규 생성. top 50 + myEntry 반환. | Claude |
+| 2026-05-30 | 리더보드 스펙 정정: top 100 → 50, myEntry null → 항상 반환 (기록 없으면 bestDb:0), 순위 계산 방식 명시. | Claude |
+| 2026-06-01 | `room:joined`/`opponent:joined`에 `isHost`, `profileImageUrl` 추가. `room:reconnected` payload 전체 확장 (`isHost`, `myScore`, `oppScore`, `roundResults`, `opponent{profileImageUrl}`). 리더보드 entries/myEntry에 `profileImageUrl` 추가. | Claude |

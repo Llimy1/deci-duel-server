@@ -27,3 +27,11 @@ export enum DiaryResponseMessage {
   DIARY_UPDATE_SUCCESS = '다이어리 기록 수정에 성공했습니다.',
   DIARY_DELETE_SUCCESS = '다이어리 기록 삭제에 성공했습니다.',
 }
+
+export enum LeaderboardResponseMessage {
+  GLOBAL_LEADERBOARD_SUCCESS = '글로벌 리더보드 조회에 성공했습니다.',
+}
+
+export enum ConsentResponseMessage {
+  CONSENT_SUCCESS = '약관 동의가 저장되었습니다.',
+}

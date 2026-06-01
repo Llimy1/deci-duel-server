@@ -9,7 +9,6 @@ export class GameRoomStore {
   private readonly socketToRoom = new Map<string, string>();
   /** userId → roomCode */
   private readonly userToRoom = new Map<number, string>();
-
   /** Generate a unique 6-character room code. */
   generateRoomCode(): string {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // excludes ambiguous I/O/0/1
@@ -34,6 +33,7 @@ export class GameRoomStore {
       scores: new Map(),
       roundRecords: [],
       roundTimer: null,
+      ttlTimer: null,
       createdAt: new Date(),
     };
     this.rooms.set(roomCode, room);

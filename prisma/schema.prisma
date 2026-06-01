@@ -26,6 +26,10 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @default(now())
 
+  termsVersion   String?   @map("terms_version")
+  privacyVersion String?   @map("privacy_version")
+  consentedAt    DateTime? @map("consented_at")
+
   soloRecords  SoloRecord[]
   diaryRecords DiaryRecord[]
 }

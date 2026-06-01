@@ -12,8 +12,16 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { GameRoomStore } from './game-room.store';
-import { GameRoom, PlayerInfo } from './types/game.types';
+import { GameRoom, GameState, PlayerInfo } from './types/game.types';
 import { UserRepository } from '../user/user.repository';
+import { R2StorageService } from '../storage/r2-storage.service';
+
+/** Room TTL after game_over / rematch_waiting: 10 minutes */
+const ROOM_TTL_MS = 10 * 60 * 1000;
+/** Forfeit grace period during active gameplay: 10 seconds */
+const FORFEIT_GRACE_MS = 10_000;
+/** States where forfeit does NOT apply (no auto-cleanup on disconnect) */
+const NO_FORFEIT_STATES: GameState[] = ['waiting', 'ready', 'game_over', 'rematch_waiting'];
 
 @WebSocketGateway({
   namespace: '/game',
@@ -30,6 +38,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly userRepository: UserRepository,
+    private readonly r2Storage: R2StorageService,
   ) {}
 
   /* ─────────────────────────── Connection lifecycle ─────────────────────── */
@@ -56,7 +65,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = client.data.userId as number;
     this.logger.log(`connected  userId=${userId}  socket=${client.id}`);
 
-    // Restore a previous session if the user was already in a room
     await this.tryReconnect(client, userId);
   }
 
@@ -76,17 +84,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     player.connected = false;
 
-    // Room still has only the host → destroy
+    const opponentId = this.getOpponentId(room, userId);
+
+    // waiting with only the host → immediate cleanup
     if (room.state === 'waiting') {
       this.cleanupRoom(room);
       return;
     }
 
-    // Game already finished → no-op
-    if (room.state === 'game_over') return;
+    // States with no forfeit: notify opponent and start/refresh TTL
+    if ((NO_FORFEIT_STATES as string[]).includes(room.state)) {
+      if (opponentId !== null) {
+        const opponent = room.players.get(opponentId);
+        if (opponent?.connected) {
+          this.server.to(opponent.socketId).emit('opponent:disconnected', { waitSecs: 0 });
+        }
+      }
+      // Ensure the room will eventually be cleaned up
+      this.refreshTTL(room);
+      return;
+    }
 
-    // Notify opponent and start forfeit timer
-    const opponentId = this.getOpponentId(room, userId);
+    // Active gameplay: countdown / playing / round_end → 10s forfeit
     if (opponentId === null) {
       this.cleanupRoom(room);
       return;
@@ -94,14 +113,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const opponent = room.players.get(opponentId);
     if (opponent?.connected) {
-      this.server.to(opponent.socketId).emit('opponent:disconnected', { waitSecs: 5 });
+      this.server.to(opponent.socketId).emit('opponent:disconnected', {
+        waitSecs: FORFEIT_GRACE_MS / 1000,
+      });
     }
 
     player.disconnectTimer = setTimeout(() => {
       this.handleForfeit(room, userId).catch(err =>
         this.logger.error('handleForfeit error', err),
       );
-    }, 5000);
+    }, FORFEIT_GRACE_MS);
   }
 
   /* ─────────────────────────── Reconnect helper ──────────────────────────── */
@@ -113,22 +134,37 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const player = room.players.get(userId);
     if (!player) return;
 
-    // Cancel pending forfeit timer
+    // 게임이 비활성 상태(waiting/game_over)에서 소켓이 새로 연결되면
+    // 재연결이 아닌 정상 접속 흐름으로 처리 — 방에서 조용히 제거하여 "이미 참여 중" 방지
+    const reconnectStates: GameState[] = ['countdown', 'playing', 'round_end', 'ready', 'rematch_waiting'];
+    if (!(reconnectStates as string[]).includes(room.state)) {
+      if (player.disconnectTimer) {
+        clearTimeout(player.disconnectTimer);
+        player.disconnectTimer = null;
+      }
+      this.store.removeUser(userId);
+      this.store.removeSocket(player.socketId);
+      room.players.delete(userId);
+      // 방이 비어있으면 정리
+      if (room.players.size === 0) {
+        this.cleanupRoom(room);
+      }
+      this.logger.log(`tryReconnect: inactive state(${room.state}), removed user=${userId} from room`);
+      return;
+    }
+
     if (player.disconnectTimer) {
       clearTimeout(player.disconnectTimer);
       player.disconnectTimer = null;
     }
 
-    // Update socket mapping
     if (player.socketId) this.store.removeSocket(player.socketId);
     player.socketId = client.id;
     player.connected = true;
     this.store.registerSocket(client.id, room.roomCode);
 
-    // Rejoin socket.io room
     client.join(room.roomCode);
 
-    // Notify opponent
     const opponentId = this.getOpponentId(room, userId);
     if (opponentId !== null) {
       const opponent = room.players.get(opponentId);
@@ -137,11 +173,35 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
 
-    // Send state snapshot so the client can resume
+    const opponentInfo = opponentId !== null ? room.players.get(opponentId) : null;
+    const myScore = room.scores.get(userId) ?? 0;
+    const oppScore = opponentId !== null ? (room.scores.get(opponentId) ?? 0) : 0;
+
+    const roundResults = room.roundRecords.map(r => ({
+      round: r.round,
+      myDb: r.submissions[userId] ?? 0,
+      oppDb: opponentId !== null ? (r.submissions[opponentId] ?? 0) : 0,
+    }));
+
+    const opponentImageUrl = opponentInfo
+      ? await this.getProfileImageUrl(opponentInfo.profileImageKey)
+      : null;
+
     client.emit('room:reconnected', {
       roomCode: room.roomCode,
-      state: room.state,
-      currentRound: room.currentRound,
+      isHost: player.isHost,
+      myScore,
+      oppScore,
+      roundResults,
+      opponent: opponentInfo
+        ? {
+            userId: opponentInfo.userId,
+            nickname: opponentInfo.nickname,
+            avatarColor: opponentInfo.avatarColor,
+            profileImageUrl: opponentImageUrl,
+            bestDb: opponentInfo.bestDb,
+          }
+        : null,
     });
   }
 
@@ -170,7 +230,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       nickname: profile.nickname,
       socketId: client.id,
       avatarColor: profile.avatarColor ?? '#6C5CE7',
+      profileImageKey: profile.profileImageKey ?? null,
+      bestDb: profile.soloRecords[0]?.bestDb ?? 0,
+      isHost: true,
       isReady: false,
+      wantsRematch: false,
       connected: true,
       roundSubmissions: {},
       disconnectTimer: null,
@@ -206,13 +270,29 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.emit('error', { message: '존재하지 않는 방 코드입니다.' });
       return;
     }
+
+    // 게임 진행 중: 입장 불가
+    const activeStates: GameState[] = ['countdown', 'playing', 'round_end'];
+    if ((activeStates as string[]).includes(room.state)) {
+      client.emit('error', { message: '이미 게임이 시작된 방입니다.' });
+      return;
+    }
+
+    // 방이 가득 찬 경우: 입장 불가
     if (room.players.size >= 2) {
       client.emit('error', { message: '방이 가득 찼습니다.' });
       return;
     }
+
+    // TTL 타이머 해제 (새 참가자 입장 시 TTL 취소)
+    if (room.ttlTimer) {
+      clearTimeout(room.ttlTimer);
+      room.ttlTimer = null;
+    }
+
+    // waiting이 아닌 상태(game_over 등)에서 새 참가자 입장 시 게임 데이터 초기화
     if (room.state !== 'waiting') {
-      client.emit('error', { message: '이미 게임이 시작된 방입니다.' });
-      return;
+      this.resetGameData(room);
     }
 
     const profile = await this.userRepository.findProfileByUserId(userId);
@@ -226,7 +306,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       nickname: profile.nickname,
       socketId: client.id,
       avatarColor: profile.avatarColor ?? '#6C5CE7',
+      profileImageKey: profile.profileImageKey ?? null,
+      bestDb: profile.soloRecords[0]?.bestDb ?? 0,
+      isHost: false,
       isReady: false,
+      wantsRematch: false,
       connected: true,
       roundSubmissions: {},
       disconnectTimer: null,
@@ -239,25 +323,35 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.join(roomCode);
 
-    // Find the host (the other player)
     const hostId = this.getOpponentId(room, userId)!;
     const host = room.players.get(hostId)!;
 
-    // Notify joiner
+    const [hostImageUrl, guestImageUrl] = await Promise.all([
+      this.getProfileImageUrl(host.profileImageKey),
+      this.getProfileImageUrl(player.profileImageKey),
+    ]);
+
+    // 게스트에게: 상대(방장) 정보 + 내가 게스트임을 전달
     client.emit('room:joined', {
       roomCode,
+      isHost: false,
       opponent: {
         userId: host.userId,
         nickname: host.nickname,
         avatarColor: host.avatarColor,
+        bestDb: host.bestDb,
+        profileImageUrl: hostImageUrl,
       },
     });
 
-    // Notify host
+    // 방장에게: 상대(게스트) 정보 + 방장 유지 확인
     this.server.to(host.socketId).emit('opponent:joined', {
       userId: player.userId,
       nickname: player.nickname,
       avatarColor: player.avatarColor,
+      bestDb: player.bestDb,
+      profileImageUrl: guestImageUrl,
+      isHost: true,
     });
 
     this.logger.log(`room joined  code=${roomCode}  guest=${userId}`);
@@ -283,6 +377,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!player) return;
 
     player.isReady = true;
+
+    // Notify opponent that this player is now ready
+    const opponentId = this.getOpponentId(room, userId);
+    if (opponentId !== null) {
+      this.emitToPlayer(room, opponentId, 'opponent:ready', {});
+    }
 
     const allReady = [...room.players.values()].every(p => p.isReady);
     if (allReady) {
@@ -324,6 +424,151 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  /* ─────────────────────────── Event: round:db ───────────────────────────── */
+
+  @SubscribeMessage('round:db')
+  onRoundDb(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { round: number; db: number },
+  ): void {
+    const userId = client.data.userId as number;
+    const room = this.store.getRoomBySocketId(client.id);
+
+    if (!room || room.state !== 'playing') return;
+    if ((data?.round ?? -1) !== room.currentRound) return;
+
+    const clampedDb = Math.max(0, Math.min(200, Number(data?.db) || 0));
+
+    const opponentId = this.getOpponentId(room, userId);
+    if (opponentId === null) return;
+
+    this.emitToPlayer(room, opponentId, 'opponent:db', {
+      round: room.currentRound,
+      db: clampedDb,
+    });
+  }
+
+  /* ─────────────────────────── Event: game:rematch ───────────────────────── */
+
+  @SubscribeMessage('game:rematch')
+  onGameRematch(@ConnectedSocket() client: Socket): void {
+    const userId = client.data.userId as number;
+    const room = this.store.getRoomByUserId(userId);
+
+    if (!room) {
+      client.emit('error', { message: '방을 찾을 수 없습니다.' });
+      return;
+    }
+    const rematchAllowed: GameState[] = ['game_over', 'rematch_waiting'];
+    if (!(rematchAllowed as string[]).includes(room.state)) {
+      client.emit('error', { message: '재대결을 요청할 수 없는 상태입니다.' });
+      return;
+    }
+
+    const player = room.players.get(userId);
+    if (!player) return;
+
+    player.wantsRematch = true;
+    room.state = 'rematch_waiting';
+
+    client.emit('rematch:waiting', { roomCode: room.roomCode });
+    this.logger.log(`rematch:waiting  code=${room.roomCode}  userId=${userId}`);
+
+    // 상대가 방에 있고 이미 rematch를 원하면 즉시 시작
+    const opponentId = this.getOpponentId(room, userId);
+    if (opponentId !== null) {
+      const opponent = room.players.get(opponentId);
+      if (opponent?.wantsRematch) {
+        this.startRematch(room);
+      }
+    }
+    // 상대가 없거나 아직 rematch 의사 없으면 rematch_waiting 유지 → room:join 대기
+  }
+
+  /* ─────────────────────────── Event: room:leave ────────────────────────── */
+
+  @SubscribeMessage('room:leave')
+  onRoomLeave(@ConnectedSocket() client: Socket): void {
+    const userId = client.data.userId as number;
+    const room = this.store.getRoomByUserId(userId);
+    if (!room) return;
+
+    const player = room.players.get(userId);
+    if (!player) return;
+
+    const opponentId = this.getOpponentId(room, userId);
+    this.logger.log(`room:leave  code=${room.roomCode}  userId=${userId}  state=${room.state}`);
+
+    // 활성 게임 중 명시적 이탈 → 즉시 forfeit (grace period 없음)
+    const activeStates: GameState[] = ['countdown', 'playing', 'round_end'];
+    if ((activeStates as string[]).includes(room.state)) {
+      if (player.disconnectTimer) {
+        clearTimeout(player.disconnectTimer);
+        player.disconnectTimer = null;
+      }
+      this.store.removeUser(userId);
+      this.store.removeSocket(player.socketId);
+      room.players.delete(userId);
+      client.leave(room.roomCode);
+
+      this.handleForfeit(room, userId).catch(err =>
+        this.logger.error('handleForfeit on room:leave error', err),
+      );
+      return;
+    }
+
+    // 비활성 상태에서 이탈 → 즉시 슬롯 해제
+    if (player.disconnectTimer) {
+      clearTimeout(player.disconnectTimer);
+      player.disconnectTimer = null;
+    }
+    const wasHost = player.isHost;
+    this.store.removeUser(userId);
+    this.store.removeSocket(player.socketId);
+    room.players.delete(userId);
+    client.leave(room.roomCode);
+
+    // 남은 플레이어 없음 → 방 정리
+    if (room.players.size === 0) {
+      this.cleanupRoom(room);
+      return;
+    }
+
+    // 1명 남음 → waiting 상태로 초기화 (새 상대 대기)
+    room.state = 'waiting';
+    room.currentRound = 0;
+    room.scores.clear();
+    room.roundRecords = [];
+    if (room.ttlTimer) {
+      clearTimeout(room.ttlTimer);
+      room.ttlTimer = null;
+    }
+    room.players.forEach(p => {
+      p.isReady = false;
+      p.wantsRematch = false;
+      p.roundSubmissions = {};
+    });
+
+    const remaining = opponentId !== null ? room.players.get(opponentId) : null;
+    if (!remaining?.connected) {
+      // 남은 플레이어도 연결 없음 → 방 정리
+      this.cleanupRoom(room);
+      return;
+    }
+
+    if (wasHost) {
+      // 방장이 나감 → 남은 플레이어를 새 방장으로 승격
+      remaining.isHost = true;
+      this.emitToPlayer(room, remaining.userId, 'room:host_transferred', {
+        roomCode: room.roomCode,
+      });
+      this.logger.log(`host transferred  code=${room.roomCode}  newHost=${remaining.userId}`);
+    } else {
+      // 게스트가 나감 → 기존 방장 유지, 상대 떠남 알림
+      this.emitToPlayer(room, remaining.userId, 'opponent:left', {});
+    }
+  }
+
   /* ─────────────────────────── Game logic ────────────────────────────────── */
 
   private startCountdown(room: GameRoom) {
@@ -336,7 +581,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (count > 0) {
         setTimeout(tick, 1000);
       } else {
-        // count === 0  →  "GO!"  →  start round shortly after
         setTimeout(() => this.startRound(room), 500);
       }
     };
@@ -351,7 +595,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     this.server.to(room.roomCode).emit('round:start', { round: room.currentRound });
 
-    // Hard-close the round after 5.5 s
     room.roundTimer = setTimeout(() => {
       this.resolveRound(room);
     }, room.roundDurationMs);
@@ -368,13 +611,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const db1 = p1.roundSubmissions[round] ?? 0;
     const db2 = p2.roundSubmissions[round] ?? 0;
 
-    // Tally scores
     if (db1 > db2) {
       room.scores.set(p1.userId, (room.scores.get(p1.userId) ?? 0) + 1);
     } else if (db2 > db1) {
       room.scores.set(p2.userId, (room.scores.get(p2.userId) ?? 0) + 1);
     }
-    // draw → no increment
 
     room.roundRecords.push({
       round,
@@ -449,22 +690,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       rounds: buildRounds(p2.userId, p1.userId),
     });
 
-    // Persist result
-    if (winner !== null) {
-      const loserId = winner === p1.userId ? p2.userId : p1.userId;
-      await Promise.all([
-        this.userRepository.incrementWins(winner),
-        this.userRepository.incrementLosses(loserId),
-      ]).catch(err => this.logger.error('DB win/loss update failed', err));
-    }
-
-    this.cleanupRoom(room);
+    // Keep room alive for rematch — TTL will clean it up if unused
+    this.refreshTTL(room);
   }
 
   private async handleForfeit(room: GameRoom, forfeitUserId: number) {
     if (room.state === 'game_over') return;
 
-    // Cancel any running round timer
     if (room.roundTimer) {
       clearTimeout(room.roundTimer);
       room.roundTimer = null;
@@ -481,7 +713,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const opponentScore = room.scores.get(opponentId) ?? 0;
     const forfeitScore = room.scores.get(forfeitUserId) ?? 0;
 
-    // Notify the still-connected opponent
     this.emitToPlayer(room, opponentId, 'game:over', {
       result: 'win',
       myScore: opponentScore,
@@ -494,16 +725,63 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       forfeit: true,
     });
 
-    // Persist result
-    await Promise.all([
-      this.userRepository.incrementWins(opponentId),
-      this.userRepository.incrementLosses(forfeitUserId),
-    ]).catch(err => this.logger.error('DB forfeit update failed', err));
+    // Keep room alive for rematch
+    this.refreshTTL(room);
+  }
 
-    this.cleanupRoom(room);
+  private startRematch(room: GameRoom): void {
+    if (room.ttlTimer) {
+      clearTimeout(room.ttlTimer);
+      room.ttlTimer = null;
+    }
+
+    this.resetGameData(room);
+
+    this.server.to(room.roomCode).emit('rematch:matched', {
+      roomCode: room.roomCode,
+    });
+
+    this.logger.log(`rematch started  code=${room.roomCode}`);
   }
 
   /* ─────────────────────────── Utilities ────────────────────────────────── */
+
+  /** Reset game data for a fresh match (keeps players, clears scores/rounds). */
+  private resetGameData(room: GameRoom): void {
+    room.state = 'ready';
+    room.currentRound = 0;
+    room.scores.clear();
+    room.roundRecords = [];
+    if (room.roundTimer) {
+      clearTimeout(room.roundTimer);
+      room.roundTimer = null;
+    }
+    room.players.forEach(p => {
+      p.isReady = false;
+      p.wantsRematch = false;
+      p.roundSubmissions = {};
+    });
+  }
+
+  /** Start or refresh the room TTL timer. */
+  private refreshTTL(room: GameRoom, ms = ROOM_TTL_MS): void {
+    if (room.ttlTimer) clearTimeout(room.ttlTimer);
+    room.ttlTimer = setTimeout(() => {
+      this.logger.log(`TTL expired  code=${room.roomCode}`);
+      this.cleanupRoom(room);
+    }, ms);
+  }
+
+  /** R2 서명 URL 생성. key가 없거나 실패 시 null 반환 (방 입장 실패로 이어지지 않도록). */
+  private async getProfileImageUrl(key: string | null): Promise<string | null> {
+    if (!key) return null;
+    try {
+      return await this.r2Storage.getSignedDownloadUrl(key);
+    } catch (err) {
+      this.logger.warn(`프로필 이미지 URL 생성 실패 [key=${key}]`, err);
+      return null;
+    }
+  }
 
   private getOpponentId(room: GameRoom, userId: number): number | null {
     for (const [pid] of room.players) {
@@ -523,6 +801,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (room.roundTimer) {
       clearTimeout(room.roundTimer);
       room.roundTimer = null;
+    }
+    if (room.ttlTimer) {
+      clearTimeout(room.ttlTimer);
+      room.ttlTimer = null;
     }
     room.players.forEach(p => {
       if (p.disconnectTimer) {

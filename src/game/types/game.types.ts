@@ -1,17 +1,22 @@
 export type GameState =
-  | 'waiting'    // room created, waiting for 2nd player
-  | 'ready'      // 2 players joined, waiting for both to press ready
-  | 'countdown'  // 3-2-1 countdown in progress
-  | 'playing'    // round in progress, accepting submissions
-  | 'round_end'  // round resolved, brief pause before next round
-  | 'game_over'; // game finished
+  | 'waiting'         // room created, waiting for 2nd player
+  | 'ready'           // 2 players joined, waiting for both to press ready
+  | 'countdown'       // 3-2-1 countdown in progress
+  | 'playing'         // round in progress, accepting submissions
+  | 'round_end'       // round resolved, brief pause before next round
+  | 'game_over'       // game finished, room kept alive for rematch
+  | 'rematch_waiting'; // at least one player requested rematch
 
 export interface PlayerInfo {
   userId: number;
   nickname: string;
   socketId: string;
   avatarColor: string;
+  profileImageKey: string | null;
+  bestDb: number;
+  isHost: boolean;
   isReady: boolean;
+  wantsRematch: boolean;
   connected: boolean;
   /** peakDb submitted per round: { [round]: dB } */
   roundSubmissions: Record<number, number>;
@@ -35,5 +40,7 @@ export interface GameRoom {
   scores: Map<number, number>;
   roundRecords: RoundRecord[];
   roundTimer: ReturnType<typeof setTimeout> | null;
+  /** TTL timer: auto-cleanup idle rooms after game_over / rematch_waiting */
+  ttlTimer: ReturnType<typeof setTimeout> | null;
   createdAt: Date;
 }

@@ -17,7 +17,24 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse();
     const status = exception.getStatus();
 
-    response.status(status).json(new ApiResponse(status, exception.message, null));
+    // ValidationPipe가 던지는 응답은 { message: string[], error: string, statusCode: number }
+    // 형태이므로 message 배열을 join해서 사람이 읽기 좋은 문자열로 변환한다.
+    const exceptionResponse = exception.getResponse();
+    let message: string = exception.message;
+    if (
+      exceptionResponse !== null &&
+      typeof exceptionResponse === 'object' &&
+      'message' in exceptionResponse
+    ) {
+      const msg = (exceptionResponse as Record<string, unknown>).message;
+      if (Array.isArray(msg)) {
+        message = msg.join(', ');
+      } else if (typeof msg === 'string') {
+        message = msg;
+      }
+    }
+
+    response.status(status).json(new ApiResponse(status, message, null));
   }
 }
 
@@ -38,9 +55,23 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // 글로벌 필터 등록 순서에 따라 여기 올 수도 있으므로 방어 처리
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
+      const exceptionResponse = exception.getResponse();
+      let message: string = exception.message;
+      if (
+        exceptionResponse !== null &&
+        typeof exceptionResponse === 'object' &&
+        'message' in exceptionResponse
+      ) {
+        const msg = (exceptionResponse as Record<string, unknown>).message;
+        if (Array.isArray(msg)) {
+          message = msg.join(', ');
+        } else if (typeof msg === 'string') {
+          message = msg;
+        }
+      }
       return response
         .status(status)
-        .json(new ApiResponse(status, exception.message, null));
+        .json(new ApiResponse(status, message, null));
     }
 
     // Prisma Known Request Error (P2002, P2025 등)

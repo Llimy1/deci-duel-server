@@ -21,7 +21,7 @@ export class AuthService {
     const existing = await this.userRepository.findUserByDevId(devId);
     if (existing) throw new ConflictException(AuthExceptionMessage.DUPLICATE_ID);
 
-    const user = await this.userRepository.devSignup(devId, devPassword, devNickname);
+    const user = await this.userRepository.devSignup(devId, devPassword, devNickname, dto.termsVersion, dto.privacyVersion);
     const tokens = this.generateTokens(user.id, user.nickname);
     await this.userRepository.updateRefreshToken(user.id, tokens.refreshToken);
 

@@ -102,9 +102,15 @@ export class DiaryController {
   }
 }
 
-/** YYYY-MM-DD 형식 검증 */
+/** YYYY-MM-DD 형식 검증 + 실존하는 날짜인지 확인 */
 function validateDateParam(date: string): void {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     throw new BadRequestException('날짜 형식은 YYYY-MM-DD여야 합니다.');
+  }
+  const [year, month, day] = date.split('-').map(Number);
+  // new Date(year, month-1, day)은 날짜가 overflow되면 자동 보정되므로
+  // getDate()가 입력한 day와 다르면 존재하지 않는 날짜다.
+  if (new Date(year, month - 1, day).getDate() !== day) {
+    throw new BadRequestException('존재하지 않는 날짜입니다.');
   }
 }

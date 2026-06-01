@@ -16,6 +16,14 @@ export class DevSignupRequest {
   @MaxLength(12, { message: '닉네임은 12자 이하여야 합니다.' })
   @Matches(/^[가-힣a-zA-Z0-9]+$/, { message: '닉네임은 한글, 영문, 숫자만 사용할 수 있습니다.' })
   nickname: string;
+
+  @IsString()
+  @MinLength(1)
+  termsVersion: string;
+
+  @IsString()
+  @MinLength(1)
+  privacyVersion: string;
 }
 
 export class DevLoginRequest {

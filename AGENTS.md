@@ -20,3 +20,6 @@
 ## 과거 실패 기록
 - socket.io-client 버전 불일치: 서버와 동일한 버전(4.x)으로 설치해야 함
 - settings.json에 mcpServers 필드 추가 불가: ~/.mcp.json 사용할 것
+- GameRoomStore에 MatchmakingEntry 타입 참조 잔재 남김 → tsc 에러. 롤백 시 관련 타입도 반드시 함께 제거
+- Gateway에 새 서비스 inject 시 spec의 TestingModule providers에 mock 추가 누락 → DI 에러. Module import 없이 { provide: Service, useValue: mock } 형태로 직접 제공
+- claude-brain 저장을 세션 마지막에 몰아서 처리 → 결정/패턴 발견 즉시 저장해야 함 (CLAUDE.md 자동 학습 규칙 준수)

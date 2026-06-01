@@ -55,7 +55,7 @@ describe('AuthController (integration)', () => {
 
   /* ────────────────────────────────────────────────────────── */
   describe('POST /auth/dev/signup', () => {
-    const VALID_BODY = { id: 'testdev01', password: 'password123', nickname: '테스터' };
+    const VALID_BODY = { id: 'testdev01', password: 'password123', nickname: '테스터', termsVersion: '1.0', privacyVersion: '1.0' };
 
     it('201 - 정상 회원가입', async () => {
       mockUserRepo.findUserByDevId.mockResolvedValue(null);

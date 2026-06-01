@@ -8,6 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { SoloRecordModule } from './record/solo/solo-record.module';
 import { DiaryModule } from './diary/diary.module';
 import { GameModule } from './game/game.module';
+import { LeaderboardModule } from './leaderboard/leaderboard.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { GameModule } from './game/game.module';
     SoloRecordModule,
     DiaryModule,
     GameModule,
+    LeaderboardModule,
   ],
   controllers: [AppController],
   providers: [AppService],

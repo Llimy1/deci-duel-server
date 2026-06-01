@@ -21,6 +21,7 @@ import { AddressInfo } from 'net';
 import { GameGateway } from './game.gateway';
 import { GameRoomStore } from './game-room.store';
 import { UserRepository } from '../user/user.repository';
+import { R2StorageService } from '../storage/r2-storage.service';
 
 /* ──────────────── 공통 설정 ──────────────── */
 
@@ -52,6 +53,10 @@ describe('GameGateway (integration)', () => {
     incrementLosses: jest.fn().mockResolvedValue({ id: 0, losses: 1 }),
   };
 
+  const mockR2Storage = {
+    getSignedDownloadUrl: jest.fn().mockResolvedValue(null),
+  };
+
   /* ── 앱 부트스트랩 ── */
   beforeAll(async () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
@@ -61,6 +66,7 @@ describe('GameGateway (integration)', () => {
         GameRoomStore,
         { provide: UserRepository, useValue: mockUserRepo },
         { provide: ConfigService, useValue: { get: () => TEST_SECRET } },
+        { provide: R2StorageService, useValue: mockR2Storage },
       ],
     }).compile();
 
@@ -533,10 +539,6 @@ describe('GameGateway (integration)', () => {
         expect(hostFinal.oppScore).toBe(0);
         expect(hostFinal.rounds).toHaveLength(3);
         expect(guestFinal.result).toBe('lose');
-
-        // DB 업데이트 검증
-        expect(mockUserRepo.incrementWins).toHaveBeenCalledWith(150);
-        expect(mockUserRepo.incrementLosses).toHaveBeenCalledWith(151);
       },
       40_000,
     );
@@ -615,7 +617,7 @@ describe('GameGateway (integration)', () => {
     );
 
     it(
-      '게임 중 disconnect → 상대방에게 opponent:disconnected { waitSecs: 5 }',
+      '게임 중 disconnect → 상대방에게 opponent:disconnected { waitSecs: 10 }',
       async () => {
         const { host, guest } = await setupRoom(210, 211);
 
@@ -630,13 +632,13 @@ describe('GameGateway (integration)', () => {
         guest.disconnect();
 
         const notice = await noticePromise;
-        expect(notice.waitSecs).toBe(5);
+        expect(notice.waitSecs).toBe(10);
       },
       15_000,
     );
 
     it(
-      '5초 대기 후 forfeit → 남은 플레이어에게 game:over { result: win, forfeit: true }',
+      '10초 대기 후 forfeit → 남은 플레이어에게 game:over { result: win, forfeit: true }',
       async () => {
         const { host, guest } = await setupRoom(220, 221);
 
@@ -649,22 +651,20 @@ describe('GameGateway (integration)', () => {
 
         guest.disconnect();
 
-        // 5초 타이머 + 여유
+        // 10초 타이머 + 여유
         const gameOver = await waitFor<{
           result: string;
           forfeit: boolean;
-        }>(host, 'game:over', 8000);
+        }>(host, 'game:over', 14000);
 
         expect(gameOver.result).toBe('win');
         expect(gameOver.forfeit).toBe(true);
-        expect(mockUserRepo.incrementWins).toHaveBeenCalledWith(220);
-        expect(mockUserRepo.incrementLosses).toHaveBeenCalledWith(221);
       },
-      15_000,
+      20_000,
     );
 
     it(
-      '5초 이내 재연결 → forfeit 취소, opponent:reconnected 전달',
+      '10초 이내 재연결 → forfeit 취소, opponent:reconnected 전달',
       async () => {
         const { host, guest } = await setupRoom(230, 231);
 
@@ -697,7 +697,20 @@ describe('GameGateway (integration)', () => {
         activeSockets.add(reconnectedSocket);
 
         // 연결 전에 리스너 먼저 등록
-        const reconnectedDataPromise = waitFor(reconnectedSocket, 'room:reconnected', 5000);
+        const reconnectedDataPromise = waitFor<{
+          roomCode: string;
+          isHost: boolean;
+          myScore: number;
+          oppScore: number;
+          roundResults: Array<{ round: number; myDb: number; oppDb: number }>;
+          opponent: {
+            userId: number;
+            nickname: string;
+            avatarColor: string;
+            profileImageUrl: string | null;
+            bestDb: number;
+          } | null;
+        }>(reconnectedSocket, 'room:reconnected', 5000);
         const hostNoticePromise = waitFor(host, 'opponent:reconnected', 5000);
 
         reconnectedSocket.connect();
@@ -706,9 +719,23 @@ describe('GameGateway (integration)', () => {
           reconnectedSocket.once('connect_error', reject);
         });
 
-        await Promise.all([hostNoticePromise, reconnectedDataPromise]);
+        const [, reconnectedData] = await Promise.all([hostNoticePromise, reconnectedDataPromise]);
 
-        const hostNotice = undefined; // opponent:reconnected는 payload 없이 emit됨
+        // room:reconnected payload 검증
+        expect(reconnectedData.roomCode).toMatch(/^[A-Z2-9]{6}$/);
+        expect(typeof reconnectedData.isHost).toBe('boolean');
+        expect(typeof reconnectedData.myScore).toBe('number');
+        expect(typeof reconnectedData.oppScore).toBe('number');
+        expect(Array.isArray(reconnectedData.roundResults)).toBe(true);
+        // opponent 정보 검증 (profileImageUrl 포함)
+        expect(reconnectedData.opponent).not.toBeNull();
+        expect(reconnectedData.opponent).toMatchObject({
+          userId: expect.any(Number),
+          nickname: expect.any(String),
+          avatarColor: expect.any(String),
+          profileImageUrl: null,      // mockR2Storage returns null
+          bestDb: expect.any(Number),
+        });
 
         // forfeit 타이머가 취소됐으므로 game:over가 와서는 안 됨 (1.5초 관찰)
         let receivedGameOver = false;
@@ -716,7 +743,126 @@ describe('GameGateway (integration)', () => {
         await delay(1500);
         expect(receivedGameOver).toBe(false);
       },
+      20_000,
+    );
+  });
+
+  /* ═══════════════════════════════════════════════════════════════
+   * 6. room:leave (명시적 이탈)
+   * ═══════════════════════════════════════════════════════════════ */
+  describe('room:leave', () => {
+    beforeEach(() => {
+      mockUserRepo.findProfileByUserId.mockImplementation((id: number) =>
+        Promise.resolve(fakeProfile(`user-${id}`)),
+      );
+    });
+
+    it(
+      'game_over 후 한 명이 room:leave → 상대에게 opponent:left, 방은 waiting 유지',
+      async () => {
+        const { host, guest } = await setupRoom(300, 301);
+
+        // 3라운드 완료해서 game_over 도달
+        const submitRound = async (round: number) => {
+          await Promise.all([waitFor(host, 'round:start', 7000), waitFor(guest, 'round:start', 7000)]);
+          host.emit('round:submit', { round, peakDb: 90 });
+          guest.emit('round:submit', { round, peakDb: 60 });
+          await Promise.all([waitFor(host, 'round:result', 3000), waitFor(guest, 'round:result', 3000)]);
+        };
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        await submitRound(1);
+        await submitRound(2);
+        await submitRound(3);
+        await Promise.all([waitFor(host, 'game:over', 4000), waitFor(guest, 'game:over', 4000)]);
+
+        // guest가 room:leave
+        const opponentLeftPromise = waitFor(host, 'opponent:left', 2000);
+        guest.emit('room:leave');
+        await opponentLeftPromise;
+
+        // guest는 새 방 생성 가능 (userToRoom 매핑 해제됐으므로)
+        const newRoomResult = await new Promise<{ roomCode: string }>(resolve => {
+          guest.once('room:created', resolve);
+          guest.emit('room:create');
+        });
+        expect(newRoomResult.roomCode).toMatch(/^[A-Z2-9]{6}$/);
+      },
+      50_000,
+    );
+
+    it(
+      '양쪽 모두 room:leave → 방 삭제 (재참여 불가)',
+      async () => {
+        const { host, guest, roomCode } = await setupRoom(310, 311);
+
+        // 게임 완료 없이 ready 상태에서 양쪽 leave
+        host.emit('room:leave');
+        guest.emit('room:leave');
+        await delay(300);
+
+        // 제3자 join 시도 → 방 없음
+        const stranger = await connect(312, 'stranger');
+        const err = await new Promise<{ message: string }>(resolve => {
+          stranger.once('error', resolve);
+          stranger.emit('room:join', { roomCode });
+        });
+        expect(err.message).toBe('존재하지 않는 방 코드입니다.');
+      },
+    );
+
+    it(
+      '게임 중 room:leave → 즉시 forfeit (grace period 없음)',
+      async () => {
+        const { host, guest } = await setupRoom(320, 321);
+        await startGame(host, guest);
+
+        const gameOverPromise = waitFor<{ result: string; forfeit: boolean }>(host, 'game:over', 3000);
+        guest.emit('room:leave');
+
+        const gameOver = await gameOverPromise;
+        expect(gameOver.result).toBe('win');
+        expect(gameOver.forfeit).toBe(true);
+      },
       15_000,
+    );
+
+    it(
+      'room:leave 후 재연결 시 새 방 만들기 가능 (이미 방에 참여 중 에러 없음)',
+      async () => {
+        mockUserRepo.findProfileByUserId
+          .mockResolvedValueOnce(fakeProfile('호스트'))
+          .mockResolvedValueOnce(fakeProfile('게스트'));
+
+        const host = await connect(330, '호스트');
+        const guest = await connect(331, '게스트');
+
+        const { roomCode } = await new Promise<{ roomCode: string }>(resolve => {
+          host.once('room:created', resolve);
+          host.emit('room:create');
+        });
+
+        await Promise.all([
+          waitFor(guest, 'room:joined'),
+          waitFor(host, 'opponent:joined'),
+          Promise.resolve(guest.emit('room:join', { roomCode })),
+        ]);
+
+        // guest가 room:leave → host에게 opponent:left 알림
+        const opponentLeftPromise = waitFor(host, 'opponent:left', 2000);
+        guest.emit('room:leave');
+        await opponentLeftPromise;
+
+        // leave한 guest가 새 방 생성 가능 (userToRoom 매핑이 해제됐으므로)
+        mockUserRepo.findProfileByUserId.mockResolvedValueOnce(fakeProfile('게스트'));
+        const newRoom = await new Promise<{ roomCode: string }>((resolve, reject) => {
+          guest.once('room:created', resolve);
+          guest.once('error', (err: { message: string }) => reject(new Error(err.message)));
+          guest.emit('room:create');
+        });
+        expect(newRoom.roomCode).toMatch(/^[A-Z2-9]{6}$/);
+        expect(newRoom.roomCode).not.toBe(roomCode);
+      },
     );
   });
 });

@@ -27,7 +27,13 @@ export class UserRepository {
     }
   }
 
-  async devSignup(devId: string, devPassword: string, devNickname: string) {
+  async devSignup(
+    devId: string,
+    devPassword: string,
+    devNickname: string,
+    termsVersion: string,
+    privacyVersion: string,
+  ) {
     try {
       return await this.prisma.user.create({
         data: {
@@ -35,6 +41,9 @@ export class UserRepository {
           devPassword,
           nickname: devNickname,
           authProvider: 'dev',
+          termsVersion,
+          privacyVersion,
+          consentedAt: new Date(),
         },
         select: {
           id: true,
