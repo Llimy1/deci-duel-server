@@ -26,6 +26,9 @@ describe('UserController (integration)', () => {
     updateNickname: jest.fn(),
     updateAvatarColor: jest.fn(),
     updateProfileImageKey: jest.fn(),
+    findProfileImageKey: jest.fn(),
+    deleteDiaryRecords: jest.fn(),
+    deleteSoloRecord: jest.fn(),
     deleteUser: jest.fn(),
     findUserByUserId: jest.fn(),
   };
@@ -354,6 +357,10 @@ describe('UserController (integration)', () => {
         nickname: '테스터',
         refreshToken: null,
       });
+      mockUserRepo.findProfileImageKey.mockResolvedValue('profiles/1/test.jpg');
+      mockR2Service.deleteObject.mockResolvedValue(undefined);
+      mockUserRepo.deleteDiaryRecords.mockResolvedValue(undefined);
+      mockUserRepo.deleteSoloRecord.mockResolvedValue(undefined);
       mockUserRepo.deleteUser.mockResolvedValue(undefined);
 
       const res = await request(app.getHttpServer())
@@ -362,6 +369,25 @@ describe('UserController (integration)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.message).toBe(UserResponseMessage.DELETE_SUCCESS);
+      expect(mockR2Service.deleteObject).toHaveBeenCalledWith('profiles/1/test.jpg');
+      expect(mockUserRepo.deleteDiaryRecords).toHaveBeenCalledWith(1);
+      expect(mockUserRepo.deleteSoloRecord).toHaveBeenCalledWith(1);
+      expect(mockUserRepo.deleteUser).toHaveBeenCalledWith(1);
+    });
+
+    it('200 - 프로필 이미지 없는 유저 탈퇴 (R2 삭제 호출 안 함)', async () => {
+      mockUserRepo.findUserByUserId.mockResolvedValue({ id: 1, nickname: '테스터', refreshToken: null });
+      mockUserRepo.findProfileImageKey.mockResolvedValue(null);
+      mockUserRepo.deleteDiaryRecords.mockResolvedValue(undefined);
+      mockUserRepo.deleteSoloRecord.mockResolvedValue(undefined);
+      mockUserRepo.deleteUser.mockResolvedValue(undefined);
+
+      const res = await request(app.getHttpServer())
+        .delete('/user/me')
+        .set('Authorization', `Bearer ${accessToken}`);
+
+      expect(res.status).toBe(200);
+      expect(mockR2Service.deleteObject).not.toHaveBeenCalled();
       expect(mockUserRepo.deleteUser).toHaveBeenCalledWith(1);
     });
 

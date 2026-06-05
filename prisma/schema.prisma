@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,26 +10,27 @@ datasource db {
 }
 
 model User {
-  id           Int      @id @default(autoincrement())
-  devId        String   @map("dev_id")
-  devPassword  String   @map("dev_password")
-  nickname     String   @unique
-  authProvider String   @map("auth_provider")
-  refreshToken String?  @map("refresh_token")
-  avatarColor     String   @default("#ff2d87") @map("avatar_color")
-  profileImageKey String?  @map("profile_image_key")
-  streak          Int      @default(0)
-  wins            Int      @default(0)
-  losses          Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @default(now())
+  id              Int       @id @default(autoincrement())
+  authProvider    String    @map("auth_provider")
+  providerId      String    @map("provider_id")
+  nickname        String    @unique
+  refreshToken    String?   @map("refresh_token")
+  avatarColor     String    @default("#ff2d87") @map("avatar_color")
+  profileImageKey String?   @map("profile_image_key")
+  streak          Int       @default(0)
+  wins            Int       @default(0)
+  losses          Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now())
 
-  termsVersion   String?   @map("terms_version")
-  privacyVersion String?   @map("privacy_version")
-  consentedAt    DateTime? @map("consented_at")
+  termsVersion    String?   @map("terms_version")
+  privacyVersion  String?   @map("privacy_version")
+  consentedAt     DateTime? @map("consented_at")
 
-  soloRecords  SoloRecord[]
-  diaryRecords DiaryRecord[]
+  soloRecords     SoloRecord[]
+  diaryRecords    DiaryRecord[]
+
+  @@unique([authProvider, providerId])
 }
 
 model SoloRecord {

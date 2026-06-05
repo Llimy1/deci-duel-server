@@ -13,6 +13,7 @@ export enum AuthResponseMessage {
   LOGIN_SUCCESS = '로그인에 성공했습니다.',
   REFRESH_SUCCESS = '토큰 재발급에 성공했습니다.',
   LOGOUT_SUCCESS = '로그아웃에 성공했습니다.',
+  OAUTH_NEW_USER = '신규 사용자입니다. 회원가입을 완료해주세요.',
 }
 
 export enum SoloRecordResponseMessage {

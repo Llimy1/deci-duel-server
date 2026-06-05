@@ -3,6 +3,9 @@ export enum AuthExceptionMessage {
   INVALID_PASSWORD = '비밀번호가 틀렸습니다',
   INVALID_TOKEN = '유효하지 않은 토큰입니다',
   DUPLICATE_ID = '이미 사용 중인 아이디입니다.',
+  OAUTH_INVALID_TOKEN = 'OAuth 토큰 검증에 실패했습니다.',
+  OAUTH_UNSUPPORTED_PROVIDER = '지원하지 않는 OAuth 제공자입니다.',
+  SIGNUP_TOKEN_INVALID = '유효하지 않은 가입 토큰입니다.',
 }
 
 export enum UserExceptionMessage {

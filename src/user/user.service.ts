@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { UserRepository } from './user.repository';
@@ -20,6 +20,8 @@ const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
+
   constructor(
     private readonly userRepository: UserRepository,
     private readonly r2StorageService: R2StorageService,
@@ -102,6 +104,24 @@ export class UserService {
   async deleteMe(userId: number): Promise<void> {
     const user = await this.userRepository.findUserByUserId(userId);
     if (!user) throw new NotFoundException(AuthExceptionMessage.USER_NOT_FOUND);
+
+    // 1. R2 프로필 이미지 삭제 (실패해도 탈퇴 계속 진행)
+    const profileImageKey = await this.userRepository.findProfileImageKey(userId);
+    if (profileImageKey) {
+      try {
+        await this.r2StorageService.deleteObject(profileImageKey);
+      } catch (err) {
+        this.logger.error(`R2 프로필 이미지 삭제 실패 [userId=${userId}]`, err);
+      }
+    }
+
+    // 2. DiaryRecord 삭제
+    await this.userRepository.deleteDiaryRecords(userId);
+
+    // 3. SoloRecord 삭제
+    await this.userRepository.deleteSoloRecord(userId);
+
+    // 4. User 삭제
     await this.userRepository.deleteUser(userId);
   }
 }

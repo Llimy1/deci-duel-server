@@ -27,37 +27,45 @@ export class UserRepository {
     }
   }
 
-  async devSignup(
-    devId: string,
-    devPassword: string,
-    devNickname: string,
+  async findByProvider(authProvider: string, providerId: string) {
+    try {
+      return await this.prisma.user.findUnique({
+        where: { authProvider_providerId: { authProvider, providerId } },
+        select: { id: true, nickname: true, refreshToken: true },
+      });
+    } catch (err) {
+      this.logger.error('findByProvider 실패', err);
+      throw new InternalServerErrorException();
+    }
+  }
+
+  async createOAuthUser(
+    authProvider: string,
+    providerId: string,
+    nickname: string,
     termsVersion: string,
     privacyVersion: string,
   ) {
     try {
       return await this.prisma.user.create({
         data: {
-          devId,
-          devPassword,
-          nickname: devNickname,
-          authProvider: 'dev',
+          authProvider,
+          providerId,
+          nickname,
           termsVersion,
           privacyVersion,
           consentedAt: new Date(),
         },
-        select: {
-          id: true,
-          nickname: true,
-        },
+        select: { id: true, nickname: true },
       });
     } catch (err) {
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002'
       ) {
-        throw new ConflictException(AuthExceptionMessage.DUPLICATE_ID);
+        throw new ConflictException(UserExceptionMessage.NICKNAME_ALREADY_EXISTS);
       }
-      this.logger.error('devSignup 실패', err);
+      this.logger.error('createOAuthUser 실패', err);
       throw new InternalServerErrorException();
     }
   }
@@ -76,22 +84,6 @@ export class UserRepository {
         throw new NotFoundException(AuthExceptionMessage.USER_NOT_FOUND);
       }
       this.logger.error('updateRefreshToken 실패', err);
-      throw new InternalServerErrorException();
-    }
-  }
-
-  async findUserByDevId(devId: string) {
-    try {
-      return await this.prisma.user.findFirst({
-        where: { devId },
-        select: {
-          id: true,
-          nickname: true,
-          devPassword: true,
-        },
-      });
-    } catch (err) {
-      this.logger.error('findUserByDevId 실패', err);
       throw new InternalServerErrorException();
     }
   }
@@ -144,6 +136,37 @@ export class UserRepository {
         throw new NotFoundException(AuthExceptionMessage.USER_NOT_FOUND);
       }
       this.logger.error('updateAvatarColor 실패', err);
+      throw new InternalServerErrorException();
+    }
+  }
+
+  async findProfileImageKey(userId: number): Promise<string | null> {
+    try {
+      const user = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { profileImageKey: true },
+      });
+      return user?.profileImageKey ?? null;
+    } catch (err) {
+      this.logger.error('findProfileImageKey 실패', err);
+      throw new InternalServerErrorException();
+    }
+  }
+
+  async deleteDiaryRecords(userId: number): Promise<void> {
+    try {
+      await this.prisma.diaryRecord.deleteMany({ where: { userId } });
+    } catch (err) {
+      this.logger.error('deleteDiaryRecords 실패', err);
+      throw new InternalServerErrorException();
+    }
+  }
+
+  async deleteSoloRecord(userId: number): Promise<void> {
+    try {
+      await this.prisma.soloRecord.deleteMany({ where: { userId } });
+    } catch (err) {
+      this.logger.error('deleteSoloRecord 실패', err);
       throw new InternalServerErrorException();
     }
   }
