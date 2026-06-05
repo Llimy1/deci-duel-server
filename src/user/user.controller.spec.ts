@@ -204,6 +204,21 @@ describe('UserController (integration)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('400/413 - 파일 크기 5MB 초과', async () => {
+      const oversizedBuffer = Buffer.alloc(5 * 1024 * 1024 + 1);
+
+      const res = await request(app.getHttpServer())
+        .post('/user/me/profile-image')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .attach('image', oversizedBuffer, {
+          filename: 'big.jpg',
+          contentType: 'image/jpeg',
+        });
+
+      // 서비스 레이어 검증(400) 또는 HTTP 레이어 크기 제한(413) 모두 허용
+      expect([400, 413]).toContain(res.status);
+    });
+
     it('401 - 토큰 없음', async () => {
       const res = await request(app.getHttpServer())
         .post('/user/me/profile-image')
@@ -245,6 +260,14 @@ describe('UserController (integration)', () => {
         .patch('/user/me/nickname')
         .set('Authorization', `Bearer ${accessToken}`)
         .send({ nickname: 'a' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - 12자 초과 닉네임', async () => {
+      const res = await request(app.getHttpServer())
+        .patch('/user/me/nickname')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ nickname: 'a'.repeat(13) });
       expect(res.status).toBe(400);
     });
 

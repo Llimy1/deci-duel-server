@@ -108,6 +108,43 @@ describe('AuthController (integration)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('400 - id 20자 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/dev/signup')
+        .send({ ...VALID_BODY, id: 'a'.repeat(21) });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - password 50자 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/dev/signup')
+        .send({ ...VALID_BODY, password: 'a'.repeat(51) });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - nickname 12자 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/dev/signup')
+        .send({ ...VALID_BODY, nickname: 'a'.repeat(13) });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - termsVersion 없음', async () => {
+      const { termsVersion: _, ...bodyWithout } = VALID_BODY;
+      const res = await request(app.getHttpServer())
+        .post('/auth/dev/signup')
+        .send(bodyWithout);
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - privacyVersion 없음', async () => {
+      const { privacyVersion: _, ...bodyWithout } = VALID_BODY;
+      const res = await request(app.getHttpServer())
+        .post('/auth/dev/signup')
+        .send(bodyWithout);
+      expect(res.status).toBe(400);
+    });
+
     it('409 - 이미 존재하는 devId', async () => {
       mockUserRepo.findUserByDevId.mockResolvedValue({ id: 99, nickname: 'existing' });
 

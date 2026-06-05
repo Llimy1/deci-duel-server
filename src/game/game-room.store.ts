@@ -33,7 +33,11 @@ export class GameRoomStore {
       scores: new Map(),
       roundRecords: [],
       roundTimer: null,
+      micReady: new Map(),
+      prepareTimer: null,
       ttlTimer: null,
+      officialRoundStarted: false,
+      prepareDeadlineAt: null,
       createdAt: new Date(),
     };
     this.rooms.set(roomCode, room);

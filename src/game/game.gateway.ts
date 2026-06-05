@@ -22,6 +22,12 @@ const ROOM_TTL_MS = 10 * 60 * 1000;
 const FORFEIT_GRACE_MS = 10_000;
 /** States where forfeit does NOT apply (no auto-cleanup on disconnect) */
 const NO_FORFEIT_STATES: GameState[] = ['waiting', 'ready', 'game_over', 'rematch_waiting'];
+/** Mic-ready prepare window: both clients must respond within this time.
+ *  8s gives users enough time to see a "mic failed" alert and tap retry
+ *  before the server forfeits them. */
+const ROUND_PREPARE_TIMEOUT_MS = 8_000;
+/** Official round measurement duration broadcast to clients */
+const ROUND_CLIENT_DURATION_MS = 5_000;
 
 @WebSocketGateway({
   namespace: '/game',
@@ -136,7 +142,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // 게임이 비활성 상태(waiting/game_over)에서 소켓이 새로 연결되면
     // 재연결이 아닌 정상 접속 흐름으로 처리 — 방에서 조용히 제거하여 "이미 참여 중" 방지
-    const reconnectStates: GameState[] = ['countdown', 'playing', 'round_end', 'ready', 'rematch_waiting'];
+    const reconnectStates: GameState[] = ['countdown', 'preparing', 'playing', 'round_end', 'ready', 'rematch_waiting'];
     if (!(reconnectStates as string[]).includes(room.state)) {
       if (player.disconnectTimer) {
         clearTimeout(player.disconnectTimer);
@@ -203,6 +209,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           }
         : null,
     });
+
+    // preparing 상태 재연결 → round:prepare 재전송 (mic-ready를 다시 보낼 수 있도록)
+    if (room.state === 'preparing') {
+      const remainingPrepareTimeoutMs = room.prepareDeadlineAt
+        ? Math.max(0, room.prepareDeadlineAt - Date.now())
+        : ROUND_PREPARE_TIMEOUT_MS;
+      client.emit('round:prepare', {
+        round: room.currentRound,
+        prepareTimeoutMs: ROUND_PREPARE_TIMEOUT_MS,
+        remainingPrepareTimeoutMs,
+      });
+    }
   }
 
   /* ─────────────────────────── Event: room:create ───────────────────────── */
@@ -272,7 +290,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     // 게임 진행 중: 입장 불가
-    const activeStates: GameState[] = ['countdown', 'playing', 'round_end'];
+    const activeStates: GameState[] = ['countdown', 'preparing', 'playing', 'round_end'];
     if ((activeStates as string[]).includes(room.state)) {
       client.emit('error', { message: '이미 게임이 시작된 방입니다.' });
       return;
@@ -485,6 +503,82 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // 상대가 없거나 아직 rematch 의사 없으면 rematch_waiting 유지 → room:join 대기
   }
 
+  /* ───────────────────────── Event: round:mic-ready ────────────────────── */
+
+  @SubscribeMessage('round:mic-ready')
+  onRoundMicReady(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { round: number },
+  ): void {
+    const userId = client.data.userId as number;
+    const room = this.store.getRoomByUserId(userId);
+    if (!room || room.state !== 'preparing') return;
+
+    const round = data?.round;
+    if (round !== room.currentRound) return; // 잘못된 라운드 — 무시
+
+    // idempotent: 이미 해당 라운드로 ready 처리된 경우 무시
+    if (room.micReady.get(userId) === round) return;
+    room.micReady.set(userId, round);
+
+    // 상대에게 mic-ready 알림 (선택적 UI 갱신용)
+    const opponentId = this.getOpponentId(room, userId);
+    if (opponentId !== null) {
+      this.emitToPlayer(room, opponentId, 'opponent:mic-ready', {});
+    }
+
+    // 양쪽 모두 ready 확인
+    const allReady = [...room.players.keys()].every(
+      pid => room.micReady.get(pid) === round,
+    );
+
+    if (allReady) {
+      if (room.prepareTimer) {
+        clearTimeout(room.prepareTimer);
+        room.prepareTimer = null;
+      }
+      this.doStartRound(room);
+    }
+  }
+
+  /* ───────────────────────── Event: round:mic-error ─────────────────────── */
+
+  @SubscribeMessage('round:mic-error')
+  onRoundMicError(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { round: number; reason?: string },
+  ): void {
+    const userId = client.data.userId as number;
+    const room = this.store.getRoomByUserId(userId);
+    if (!room || room.state !== 'preparing') return;
+    if ((data?.round ?? -1) !== room.currentRound) return;
+
+    this.logger.warn(
+      `round:mic-error  code=${room.roomCode}  userId=${userId}  reason=${data?.reason ?? 'unknown'}`,
+    );
+
+    if (room.prepareTimer) {
+      clearTimeout(room.prepareTimer);
+      room.prepareTimer = null;
+    }
+
+    if (!room.officialRoundStarted) {
+      // 공식 라운드 시작 전 → match:prepare-failed + room reset
+      this.emitMatchPrepareFailed(room, [userId]);
+      return;
+    }
+
+    // 공식 라운드 시작 후 → 기존 forfeit
+    const opponentId = this.getOpponentId(room, userId);
+    if (opponentId !== null) {
+      this.emitToPlayer(room, opponentId, 'opponent:mic-error', {});
+    }
+
+    this.handleForfeit(room, userId).catch(err =>
+      this.logger.error('handleForfeit on mic-error', err),
+    );
+  }
+
   /* ─────────────────────────── Event: room:leave ────────────────────────── */
 
   @SubscribeMessage('room:leave')
@@ -499,13 +593,63 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const opponentId = this.getOpponentId(room, userId);
     this.logger.log(`room:leave  code=${room.roomCode}  userId=${userId}  state=${room.state}`);
 
-    // 활성 게임 중 명시적 이탈 → 즉시 forfeit (grace period 없음)
-    const activeStates: GameState[] = ['countdown', 'playing', 'round_end'];
+    const wasHost = player.isHost;
+
+    // 활성 게임 중 명시적 이탈
+    const activeStates: GameState[] = ['countdown', 'preparing', 'playing', 'round_end'];
     if ((activeStates as string[]).includes(room.state)) {
       if (player.disconnectTimer) {
         clearTimeout(player.disconnectTimer);
         player.disconnectTimer = null;
       }
+      if (room.prepareTimer) {
+        clearTimeout(room.prepareTimer);
+        room.prepareTimer = null;
+      }
+
+      if (!room.officialRoundStarted) {
+        // 공식 라운드 시작 전 → setup cancel (forfeit 없음)
+        this.store.removeUser(userId);
+        this.store.removeSocket(player.socketId);
+        room.players.delete(userId);
+        client.leave(room.roomCode);
+
+        if (room.players.size === 0) {
+          this.cleanupRoom(room);
+          return;
+        }
+        room.state = 'waiting';
+        room.currentRound = 0;
+        room.scores.clear();
+        room.roundRecords = [];
+        room.micReady.clear();
+        room.officialRoundStarted = false;
+        room.prepareDeadlineAt = null;
+        if (room.roundTimer) { clearTimeout(room.roundTimer); room.roundTimer = null; }
+        if (room.ttlTimer) { clearTimeout(room.ttlTimer); room.ttlTimer = null; }
+        room.players.forEach(p => {
+          p.isReady = false;
+          p.wantsRematch = false;
+          p.roundSubmissions = {};
+        });
+        const remaining = opponentId !== null ? room.players.get(opponentId) : null;
+        if (!remaining?.connected) {
+          this.cleanupRoom(room);
+          return;
+        }
+        if (wasHost) {
+          remaining.isHost = true;
+          this.emitToPlayer(room, remaining.userId, 'room:host_transferred', {
+            roomCode: room.roomCode,
+          });
+          this.logger.log(`host transferred  code=${room.roomCode}  newHost=${remaining.userId}`);
+        } else {
+          this.emitToPlayer(room, remaining.userId, 'opponent:left', {});
+        }
+        return;
+      }
+
+      // officialRoundStarted: 기존 active forfeit
       this.store.removeUser(userId);
       this.store.removeSocket(player.socketId);
       room.players.delete(userId);
@@ -522,7 +666,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       clearTimeout(player.disconnectTimer);
       player.disconnectTimer = null;
     }
-    const wasHost = player.isHost;
     this.store.removeUser(userId);
     this.store.removeSocket(player.socketId);
     room.players.delete(userId);
@@ -539,6 +682,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     room.currentRound = 0;
     room.scores.clear();
     room.roundRecords = [];
+    room.micReady.clear();
+    if (room.prepareTimer) { clearTimeout(room.prepareTimer); room.prepareTimer = null; }
     if (room.ttlTimer) {
       clearTimeout(room.ttlTimer);
       room.ttlTimer = null;
@@ -581,23 +726,83 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (count > 0) {
         setTimeout(tick, 1000);
       } else {
-        setTimeout(() => this.startRound(room), 500);
+        setTimeout(() => this.prepareRound(room), 500);
       }
     };
     setTimeout(tick, 1000);
   }
 
-  private startRound(room: GameRoom) {
+  /** Countdown 종료 후 호출. round:prepare broadcast + prepare timeout 시작 */
+  private prepareRound(room: GameRoom) {
+    if (room.state === 'game_over') return;
+
+    room.state = 'preparing';
+    room.currentRound++;
+    room.micReady.clear(); // 라운드별 mic-ready 초기화
+    room.prepareDeadlineAt = Date.now() + ROUND_PREPARE_TIMEOUT_MS;
+
+    this.server.to(room.roomCode).emit('round:prepare', {
+      round: room.currentRound,
+      prepareTimeoutMs: ROUND_PREPARE_TIMEOUT_MS,
+      remainingPrepareTimeoutMs: ROUND_PREPARE_TIMEOUT_MS,
+    });
+
+    // 제한 시간 내 양쪽 mic-ready가 오지 않으면 미준비 플레이어를 forfeit 처리
+    room.prepareTimer = setTimeout(() => {
+      if (room.state !== 'preparing') return;
+      this.logger.warn(`prepare timeout  code=${room.roomCode}  round=${room.currentRound}`);
+
+      const notReadyIds = [...room.players.keys()].filter(
+        pid => room.micReady.get(pid) !== room.currentRound,
+      );
+
+      if (notReadyIds.length === 0) {
+        // stale timer — 이미 양쪽 모두 ready, 아무것도 하지 않음
+        this.logger.warn(`stale prepare timer  code=${room.roomCode}`);
+        room.prepareTimer = null;
+        return;
+      }
+
+      if (!room.officialRoundStarted) {
+        // 공식 라운드 시작 전 준비 실패 → match:prepare-failed + room reset to ready
+        this.emitMatchPrepareFailed(room, notReadyIds);
+        room.prepareTimer = null;
+        return;
+      }
+
+      // 공식 라운드 시작 후
+      if (notReadyIds.length === 1) {
+        const notReadyId = notReadyIds[0];
+        const oppId = this.getOpponentId(room, notReadyId);
+        if (oppId !== null) {
+          this.emitToPlayer(room, oppId, 'opponent:mic-error', {});
+        }
+        this.handleForfeit(room, notReadyId).catch(err =>
+          this.logger.error('handleForfeit on prepare timeout', err),
+        );
+      } else {
+        // 공식 라운드 이후 양쪽 모두 미준비 → technical abort (draw)
+        this.emitTechnicalAbort(room);
+      }
+      room.prepareTimer = null;
+    }, ROUND_PREPARE_TIMEOUT_MS);
+  }
+
+  /** 양쪽 mic-ready 확인 후 공식 라운드 시작 */
+  private doStartRound(room: GameRoom) {
     if (room.state === 'game_over') return;
 
     room.state = 'playing';
-    room.currentRound++;
+    room.officialRoundStarted = true;
 
-    this.server.to(room.roomCode).emit('round:start', { round: room.currentRound });
+    this.server.to(room.roomCode).emit('round:start', {
+      round: room.currentRound,
+      durationMs: ROUND_CLIENT_DURATION_MS,
+    });
 
     room.roundTimer = setTimeout(() => {
       this.resolveRound(room);
-    }, room.roundDurationMs);
+    }, room.roundDurationMs); // 5500ms hard close
   }
 
   private resolveRound(room: GameRoom) {
@@ -752,9 +957,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     room.currentRound = 0;
     room.scores.clear();
     room.roundRecords = [];
+    room.micReady.clear();
+    room.officialRoundStarted = false;
+    room.prepareDeadlineAt = null;
     if (room.roundTimer) {
       clearTimeout(room.roundTimer);
       room.roundTimer = null;
+    }
+    if (room.prepareTimer) {
+      clearTimeout(room.prepareTimer);
+      room.prepareTimer = null;
     }
     room.players.forEach(p => {
       p.isReady = false;
@@ -797,10 +1009,62 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  /**
+   * 공식 라운드 시작 전 준비 실패 처리.
+   * room을 ready 상태로 초기화하고 양쪽에 match:prepare-failed를 보낸다.
+   * 방은 유지된다 (cleanupRoom 호출 없음).
+   */
+  private emitMatchPrepareFailed(room: GameRoom, failedUserIds: number[]): void {
+    const message = '마이크를 준비하지 못해 대결 시작이 취소되었습니다.';
+    this.server.to(room.roomCode).emit('match:prepare-failed', {
+      reason: 'mic_prepare_failed',
+      failedUserIds,
+      round: room.currentRound,
+      retryable: true,
+      resetTo: 'match_ready',
+      message,
+    });
+    this.logger.log(
+      `match:prepare-failed  code=${room.roomCode}  failedUserIds=${failedUserIds.join(',')}`,
+    );
+    // room을 ready 상태로 초기화 (players 유지)
+    this.resetGameData(room);
+  }
+
+  /**
+   * 공식 라운드 이후 양쪽 모두 준비 실패 → technical abort (draw).
+   * game:over (draw) + cleanupRoom.
+   */
+  private emitTechnicalAbort(room: GameRoom): void {
+    const players = [...room.players.values()];
+    for (const player of players) {
+      const oppId = this.getOpponentId(room, player.userId);
+      const myScore = room.scores.get(player.userId) ?? 0;
+      const oppScore = oppId !== null ? (room.scores.get(oppId) ?? 0) : 0;
+      this.emitToPlayer(room, player.userId, 'game:over', {
+        result: 'draw',
+        myScore,
+        oppScore,
+        rounds: room.roundRecords.map(r => ({
+          round: r.round,
+          myDb: r.submissions[player.userId] ?? 0,
+          oppDb: oppId !== null ? (r.submissions[oppId] ?? 0) : 0,
+        })),
+        forfeit: true,
+        reason: 'all_mic_prepare_failed',
+      });
+    }
+    this.cleanupRoom(room);
+  }
+
   private cleanupRoom(room: GameRoom) {
     if (room.roundTimer) {
       clearTimeout(room.roundTimer);
       room.roundTimer = null;
+    }
+    if (room.prepareTimer) {
+      clearTimeout(room.prepareTimer);
+      room.prepareTimer = null;
     }
     if (room.ttlTimer) {
       clearTimeout(room.ttlTimer);

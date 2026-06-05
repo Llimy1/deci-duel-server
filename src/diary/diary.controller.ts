@@ -36,6 +36,7 @@ export class DiaryController {
     @Req() req: authRequestInterface.AuthRequest,
     @Body() dto: CreateDiaryRequest,
   ): Promise<ApiResponse<CreateDiaryResponse>> {
+    validateDateParam(dto.date);
     const userId = req.user.userId;
     const result = await this.diaryService.createDiary(userId, dto);
     return new ApiResponse(HttpStatus.CREATED, DiaryResponseMessage.DIARY_CREATE_SUCCESS, result);
@@ -108,9 +109,17 @@ function validateDateParam(date: string): void {
     throw new BadRequestException('날짜 형식은 YYYY-MM-DD여야 합니다.');
   }
   const [year, month, day] = date.split('-').map(Number);
-  // new Date(year, month-1, day)은 날짜가 overflow되면 자동 보정되므로
-  // getDate()가 입력한 day와 다르면 존재하지 않는 날짜다.
-  if (new Date(year, month - 1, day).getDate() !== day) {
+  // 빠른 범위 guard
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new BadRequestException('존재하지 않는 날짜입니다.');
+  }
+  // JavaScript Date overflow 검증 (예: 2024-02-30, 2024-13-15 등)
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() + 1 !== month ||
+    parsed.getDate() !== day
+  ) {
     throw new BadRequestException('존재하지 않는 날짜입니다.');
   }
 }

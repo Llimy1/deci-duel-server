@@ -150,6 +150,30 @@ describe('DiaryController (integration)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('400 - emoji 2자 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/diary')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ ...VALID_BODY, emoji: 'abc' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - comment 200자 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/diary')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ ...VALID_BODY, comment: 'a'.repeat(201) });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - 존재하지 않는 날짜 (2024-02-30)', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/diary')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ ...VALID_BODY, date: '2024-02-30' });
+      expect(res.status).toBe(400);
+    });
+
     it('401 - 토큰 없음', async () => {
       const res = await request(app.getHttpServer())
         .post('/diary')
@@ -230,6 +254,22 @@ describe('DiaryController (integration)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('400 - year 2000 미만', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .query({ year: '1999', month: '5' });
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - year 2100 초과', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .query({ year: '2101', month: '5' });
+      expect(res.status).toBe(400);
+    });
+
     it('401 - 토큰 없음', async () => {
       const res = await request(app.getHttpServer())
         .get('/diary')
@@ -279,6 +319,34 @@ describe('DiaryController (integration)', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.message).toBe(DiaryExceptionMessage.DIARY_NOT_FOUND);
+    });
+
+    it('400 - 존재하지 않는 날짜 (2024-02-30)', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary/2024-02-30')
+        .set('Authorization', `Bearer ${accessToken}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - 2024-13-15 (월 overflow)', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary/2024-13-15')
+        .set('Authorization', `Bearer ${accessToken}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - 2024-00-15 (월 0)', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary/2024-00-15')
+        .set('Authorization', `Bearer ${accessToken}`);
+      expect(res.status).toBe(400);
+    });
+
+    it('400 - 2024-01-00 (일 0)', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/diary/2024-01-00')
+        .set('Authorization', `Bearer ${accessToken}`);
+      expect(res.status).toBe(400);
     });
 
     it('401 - 토큰 없음', async () => {

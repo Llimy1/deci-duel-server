@@ -375,8 +375,10 @@ waiting → ready → countdown → playing → round_end ┐
 | `game:ready` | _(없음)_ | 준비 완료 선언. 양쪽 모두 ready이면 카운트다운 시작. |
 | `round:submit` | `{ round: number; peakDb: number }` | 라운드 피크 dB 제출. 범위 clamp: 0–200. |
 | `round:db` | `{ round: number; db: number }` | 측정 중 실시간 dB 스트림. 상대에게 `opponent:db` 전달. `playing` 상태만 처리. |
+| `round:mic-ready` | `{ round: number }` | 마이크 준비 완료 선언. `preparing` 상태에서만 유효. |
+| `round:mic-error` | `{ round: number, reason?: string }` | 마이크 준비 실패 선언. `preparing` 상태에서만 유효. 공식 라운드 시작 전이면 `match:prepare-failed`로 처리, 이후면 forfeit. |
 | `game:rematch` | _(없음)_ | 재대결 요청. `game_over` 또는 `rematch_waiting` 상태에서만 가능. |
-| `room:leave` | _(없음)_ | 명시적 방 나가기. 네트워크 disconnect와 다르게 즉시 슬롯 해제. 활성 게임 중이면 즉시 forfeit 처리. |
+| `room:leave` | _(없음)_ | 명시적 방 나가기. 활성 게임 중 + 공식 라운드 시작 전이면 setup cancel (forfeit 없음). 공식 라운드 시작 후면 즉시 forfeit. |
 
 ---
 
@@ -402,10 +404,14 @@ waiting → ready → countdown → playing → round_end ┐
 | 이벤트 | payload | 시점 |
 |--------|---------|------|
 | `round:countdown` | `{ count: number }` | 3→2→1→0, 1초 간격 |
-| `round:start` | `{ round: number }` | 라운드 시작 (measuring 시작) |
+| `round:prepare` | `{ round: number, prepareTimeoutMs: number, remainingPrepareTimeoutMs?: number }` | 라운드 시작 전 마이크 준비 요청. 현재 prepare window: 8000ms |
+| `opponent:mic-ready` | `{}` | 상대방 마이크 준비 완료 |
+| `opponent:mic-error` | `{}` | 상대방 마이크 준비 실패 |
+| `round:start` | `{ round: number, durationMs: number }` | 라운드 시작 (측정 시작). durationMs: 클라이언트 측정 시간 (5000ms) |
 | `opponent:db` | `{ round: number; db: number }` | 상대방의 실시간 dB (0–200) |
 | `round:result` | `{ round, myDb, oppDb, roundResult: 'win'|'lose'|'draw', myScore, oppScore }` | 라운드 종료 |
 | `game:over` | `{ result: 'win'|'lose'|'draw', myScore, oppScore, rounds: [{round, myDb, oppDb}], forfeit?: true }` | 게임 종료 |
+| `match:prepare-failed` | `{ reason: 'mic_prepare_failed', failedUserIds: number[], round: number, retryable: true, resetTo: 'match_ready', message: string }` | 공식 라운드 시작 전 mic 준비 실패. `game:over`와 다르며 전적/점수에 반영되지 않음. 양쪽 client가 MatchFound 화면으로 복귀해야 함. |
 
 #### 재대결
 
@@ -421,6 +427,12 @@ waiting → ready → countdown → playing → round_end ┐
 | `opponent:disconnected` | `{ waitSecs: number }` | 상대 연결 끊김. 활성 게임 중(`countdown`/`playing`/`round_end`)이면 `waitSecs: 10` (forfeit 대기). 그 외 상태는 `waitSecs: 0`. |
 | `opponent:reconnected` | _(payload 없음)_ | 상대방이 10초 내 재연결 |
 | `opponent:left` | `{}` | 상대방이 `room:leave`로 명시적으로 나감. 방은 `waiting` 상태로 전환됨. |
+| `room:host_transferred` | `{ roomCode: string }` | 방장이 이탈하여 내가 새 방장으로 승격됨 |
+
+> **마이크 권한 vs 런타임 준비 실패:**
+> - 권한 없음: app-only gate (DuelLobby/SoloMeasure 진입 전 차단). 서버는 권한 상태를 알지 못함.
+> - 런타임 mic prepare 실패: `round:prepare` 이후 `round:mic-ready`가 prepare window 안에 도착하지 않으면 서버 timeout 정책 적용.
+> - `all_mic_not_ready`/`mic_prepare_failed`는 permission failure가 아니라 runtime prepare failure.
 
 #### 에러
 
@@ -435,6 +447,7 @@ waiting → ready → countdown → playing → round_end ┐
 | 항목 | 값 |
 |------|----|
 | 라운드 서버 하드 타임아웃 | 5.5초 |
+| Mic prepare window | **8초** |
 | Forfeit grace period (활성 게임 중 disconnect) | **10초** |
 | 방 TTL (game_over / rematch_waiting 후 자동 정리) | **10분** |
 | waiting 상태 단독 disconnect | 즉시 방 삭제 |
@@ -495,3 +508,4 @@ waiting → ready → countdown → playing → round_end ┐
 | 2026-05-28 | `GET /leaderboard/global` 추가. LeaderboardModule 신규 생성. top 50 + myEntry 반환. | Claude |
 | 2026-05-30 | 리더보드 스펙 정정: top 100 → 50, myEntry null → 항상 반환 (기록 없으면 bestDb:0), 순위 계산 방식 명시. | Claude |
 | 2026-06-01 | `room:joined`/`opponent:joined`에 `isHost`, `profileImageUrl` 추가. `room:reconnected` payload 전체 확장 (`isHost`, `myScore`, `oppScore`, `roundResults`, `opponent{profileImageUrl}`). 리더보드 entries/myEntry에 `profileImageUrl` 추가. | Claude |
+| 2026-06-03 | `officialRoundStarted` 플래그 도입. 공식 라운드 시작 전 mic 준비 실패 → `match:prepare-failed` (forfeit 없음, 방 유지). 이후 실패는 기존 forfeit 유지. `round:prepare`에 `remainingPrepareTimeoutMs` 추가. `round:mic-ready`, `round:mic-error` 이벤트 문서화. `match:prepare-failed` 이벤트 추가. `room:host_transferred` 이벤트 추가. 날짜 검증 강화 (월/일 범위 guard). | Claude |

@@ -152,14 +152,20 @@ describe('GameGateway (integration)', () => {
 
   /**
    * 두 소켓이 게임을 시작하고 1라운드 round:start 까지 진행.
-   * (countdown 3.5 s 소요)
+   * (countdown 3.5 s + round:prepare handshake 소요)
    */
   const startGame = async (host: ClientSocket, guest: ClientSocket) => {
+    host.emit('game:ready');
+    guest.emit('game:ready');
+    const [hostPrepare, guestPrepare] = await Promise.all([
+      waitFor<{ round: number; prepareTimeoutMs: number }>(host, 'round:prepare', 7000),
+      waitFor<{ round: number; prepareTimeoutMs: number }>(guest, 'round:prepare', 7000),
+    ]);
+    host.emit('round:mic-ready', { round: hostPrepare.round });
+    guest.emit('round:mic-ready', { round: guestPrepare.round });
     await Promise.all([
       waitFor(host, 'round:start', 7000),
       waitFor(guest, 'round:start', 7000),
-      Promise.resolve(host.emit('game:ready')),
-      Promise.resolve(guest.emit('game:ready')),
     ]);
   };
 
@@ -374,11 +380,17 @@ describe('GameGateway (integration)', () => {
         host.on('round:countdown', ({ count }: { count: number }) => hostCounts.push(count));
         guest.on('round:countdown', ({ count }: { count: number }) => guestCounts.push(count));
 
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare, guestPrepare] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:prepare', 7000),
+          waitFor<{ round: number }>(guest, 'round:prepare', 7000),
+        ]);
+        host.emit('round:mic-ready', { round: hostPrepare.round });
+        guest.emit('round:mic-ready', { round: guestPrepare.round });
         const [hostStart, guestStart] = await Promise.all([
           waitFor<{ round: number }>(host, 'round:start', 7000),
           waitFor<{ round: number }>(guest, 'round:start', 7000),
-          Promise.resolve(host.emit('game:ready')),
-          Promise.resolve(guest.emit('game:ready')),
         ]);
 
         expect(hostCounts).toEqual([3, 2, 1, 0]);
@@ -497,6 +509,12 @@ describe('GameGateway (integration)', () => {
 
         // 라운드 시작을 기다렸다가 제출하는 루프 (host가 항상 이김)
         const submitRound = async (round: number) => {
+          const [hostPrep, guestPrep] = await Promise.all([
+            waitFor<{ round: number }>(host, 'round:prepare', 10_000),
+            waitFor<{ round: number }>(guest, 'round:prepare', 10_000),
+          ]);
+          host.emit('round:mic-ready', { round: hostPrep.round });
+          guest.emit('round:mic-ready', { round: guestPrep.round });
           await Promise.all([
             waitFor(host, 'round:start', 7000),
             waitFor(guest, 'round:start', 7000),
@@ -550,6 +568,12 @@ describe('GameGateway (integration)', () => {
 
         // 라운드별: host win, guest win, draw → 1:1:0 → 무승부
         const submitRound = async (round: number, hostDb: number, guestDb: number) => {
+          const [hostPrep, guestPrep] = await Promise.all([
+            waitFor<{ round: number }>(host, 'round:prepare', 10_000),
+            waitFor<{ round: number }>(guest, 'round:prepare', 10_000),
+          ]);
+          host.emit('round:mic-ready', { round: hostPrep.round });
+          guest.emit('round:mic-ready', { round: guestPrep.round });
           await Promise.all([
             waitFor(host, 'round:start', 7000),
             waitFor(guest, 'round:start', 7000),
@@ -582,7 +606,446 @@ describe('GameGateway (integration)', () => {
   });
 
   /* ═══════════════════════════════════════════════════════════════
-   * 5. Disconnect / Forfeit  (실제 5s 타이머 → 느림)
+   * 5. round:prepare handshake
+   * ═══════════════════════════════════════════════════════════════ */
+  describe('round:prepare handshake', () => {
+    beforeEach(() => {
+      mockUserRepo.findProfileByUserId.mockImplementation((id: number) =>
+        Promise.resolve(fakeProfile(`user-${id}`)),
+      );
+    });
+
+    it(
+      'round:prepare payload → round, prepareTimeoutMs, remainingPrepareTimeoutMs 포함',
+      async () => {
+        const { host, guest } = await setupRoom(400, 401);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number; prepareTimeoutMs: number; remainingPrepareTimeoutMs: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+        expect(hostPrepare.round).toBe(1);
+        expect(typeof hostPrepare.prepareTimeoutMs).toBe('number');
+        expect(hostPrepare.prepareTimeoutMs).toBeGreaterThan(0);
+        expect(typeof hostPrepare.remainingPrepareTimeoutMs).toBe('number');
+        expect(hostPrepare.remainingPrepareTimeoutMs).toBeGreaterThan(0);
+        expect(hostPrepare.remainingPrepareTimeoutMs).toBeLessThanOrEqual(hostPrepare.prepareTimeoutMs);
+      },
+      10_000,
+    );
+
+    it(
+      'round:mic-error + officialRoundStarted=false → 양쪽 match:prepare-failed, game:over 없음',
+      async () => {
+        const { host, guest } = await setupRoom(402, 403);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        const hostPrepareFailed = waitFor<{ reason: string; retryable: boolean }>(host, 'match:prepare-failed', 3000);
+        const guestPrepareFailed = waitFor<{ reason: string; retryable: boolean }>(guest, 'match:prepare-failed', 3000);
+
+        const hostGameOvers: unknown[] = [];
+        const guestGameOvers: unknown[] = [];
+        host.on('game:over', d => hostGameOvers.push(d));
+        guest.on('game:over', d => guestGameOvers.push(d));
+
+        // host가 mic-error 전송 → 공식 라운드 전이므로 match:prepare-failed
+        host.emit('round:mic-error', { round: hostPrepare.round });
+
+        const [hFailed, gFailed] = await Promise.all([hostPrepareFailed, guestPrepareFailed]);
+        expect(hFailed.reason).toBe('mic_prepare_failed');
+        expect(hFailed.retryable).toBe(true);
+        expect(gFailed.reason).toBe('mic_prepare_failed');
+
+        // game:over는 없어야 함
+        await delay(500);
+        expect(hostGameOvers).toHaveLength(0);
+        expect(guestGameOvers).toHaveLength(0);
+      },
+      15_000,
+    );
+
+    it(
+      'prepare 타임아웃 + officialRoundStarted=false (1명 미준비) → 양쪽 match:prepare-failed, game:over 없음',
+      async () => {
+        const { host, guest } = await setupRoom(404, 405);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number; prepareTimeoutMs: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        // guest만 mic-ready 전송, host는 전송 안 함
+        guest.emit('round:mic-ready', { round: hostPrepare.round });
+
+        const hostGameOvers: unknown[] = [];
+        const guestGameOvers: unknown[] = [];
+        host.on('game:over', d => hostGameOvers.push(d));
+        guest.on('game:over', d => guestGameOvers.push(d));
+
+        // prepare timeout 경과 → officialRoundStarted=false이므로 match:prepare-failed
+        const [hostPrepareFailed, guestPrepareFailed] = await Promise.all([
+          waitFor<{ reason: string; retryable: boolean }>(
+            host, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+          waitFor<{ reason: string; retryable: boolean }>(
+            guest, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+        ]);
+        expect(hostPrepareFailed.reason).toBe('mic_prepare_failed');
+        expect(hostPrepareFailed.retryable).toBe(true);
+        expect(guestPrepareFailed.reason).toBe('mic_prepare_failed');
+
+        // game:over는 없어야 함
+        await delay(500);
+        expect(hostGameOvers).toHaveLength(0);
+        expect(guestGameOvers).toHaveLength(0);
+      },
+      15_000,
+    );
+
+    it(
+      'prepare 타임아웃에서 양쪽 모두 미준비 + officialRoundStarted=false → match:prepare-failed, game:over 없음, 방 유지',
+      async () => {
+        const { host, guest, roomCode } = await setupRoom(410, 411);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number; prepareTimeoutMs: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        const hostGameOvers: Array<{ result: string; forfeit?: boolean }> = [];
+        const guestGameOvers: Array<{ result: string; forfeit?: boolean }> = [];
+        host.on('game:over', (data: { result: string; forfeit?: boolean }) => hostGameOvers.push(data));
+        guest.on('game:over', (data: { result: string; forfeit?: boolean }) => guestGameOvers.push(data));
+
+        // 양쪽 모두 round:mic-ready를 보내지 않음 → match:prepare-failed (game:over 없음)
+        const [hostPrepareFailed, guestPrepareFailed] = await Promise.all([
+          waitFor<{ reason: string; retryable: boolean; resetTo: string }>(
+            host, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+          waitFor<{ reason: string; retryable: boolean; resetTo: string }>(
+            guest, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+        ]);
+
+        expect(hostPrepareFailed.reason).toBe('mic_prepare_failed');
+        expect(hostPrepareFailed.retryable).toBe(true);
+        expect(hostPrepareFailed.resetTo).toBe('match_ready');
+        expect(guestPrepareFailed.reason).toBe('mic_prepare_failed');
+
+        // game:over는 없어야 함
+        expect(hostGameOvers).toHaveLength(0);
+        expect(guestGameOvers).toHaveLength(0);
+
+        // 방은 유지됨 (ready 상태로 돌아감) — 제3자가 참여할 수 있으면 안 됨 (2명이 아직 있으므로)
+        const stranger = await connect(412, 'stranger');
+        const err = await new Promise<{ message: string }>(resolve => {
+          stranger.once('error', resolve);
+          stranger.emit('room:join', { roomCode });
+        });
+        // 방이 유지되고 2명이 있으므로 "방이 가득 찼습니다." 에러가 와야 함
+        expect(err.message).toBe('방이 가득 찼습니다.');
+      },
+      15_000,
+    );
+
+    it(
+      'preparing 중 재연결 → 재연결 소켓이 round:prepare를 다시 받고 mic-ready 후 시작 가능',
+      async () => {
+        const { host, guest } = await setupRoom(413, 414);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:prepare', 7000),
+          waitFor<{ round: number }>(guest, 'round:prepare', 7000),
+        ]);
+
+        guest.disconnect();
+        await waitFor(host, 'opponent:disconnected', 3000);
+        await delay(200);
+
+        const token = jwtService.sign({ sub: 414, nickname: 'user-414' }, { expiresIn: '15m' });
+        const reconnectedSocket = io(`http://localhost:${port}/game`, {
+          auth: { token },
+          transports: ['websocket'],
+          reconnection: false,
+          autoConnect: false,
+        });
+        activeSockets.add(reconnectedSocket);
+
+        const reconnectedDataPromise = waitFor(reconnectedSocket, 'room:reconnected', 2000);
+        const repreparePromise = waitFor<{ round: number; prepareTimeoutMs: number; remainingPrepareTimeoutMs: number }>(
+          reconnectedSocket,
+          'round:prepare',
+          2000,
+        );
+        const hostNoticePromise = waitFor(host, 'opponent:reconnected', 2000);
+
+        reconnectedSocket.connect();
+        await new Promise<void>((resolve, reject) => {
+          reconnectedSocket.once('connect', resolve);
+          reconnectedSocket.once('connect_error', reject);
+        });
+
+        await Promise.all([reconnectedDataPromise, hostNoticePromise]);
+        const reprepare = await repreparePromise;
+
+        // remainingPrepareTimeoutMs는 전체 timeout보다 작거나 같아야 함
+        expect(typeof reprepare.remainingPrepareTimeoutMs).toBe('number');
+        expect(reprepare.remainingPrepareTimeoutMs).toBeGreaterThanOrEqual(0);
+        expect(reprepare.remainingPrepareTimeoutMs).toBeLessThanOrEqual(reprepare.prepareTimeoutMs);
+
+        host.emit('round:mic-ready', { round: hostPrepare.round });
+        reconnectedSocket.emit('round:mic-ready', { round: reprepare.round });
+
+        const [hostStart, reconnectedStart] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:start', 3000),
+          waitFor<{ round: number }>(reconnectedSocket, 'round:start', 3000),
+        ]);
+        expect(hostStart.round).toBe(1);
+        expect(reconnectedStart.round).toBe(1);
+      },
+      15_000,
+    );
+
+    it(
+      'round:mic-ready 중복 전송 → idempotent, round:start 정상 수신',
+      async () => {
+        const { host, guest } = await setupRoom(406, 407);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare, guestPrepare] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:prepare', 7000),
+          waitFor<{ round: number }>(guest, 'round:prepare', 7000),
+        ]);
+
+        // host가 같은 라운드로 mic-ready를 2번 전송 → 두 번째는 무시
+        host.emit('round:mic-ready', { round: hostPrepare.round });
+        host.emit('round:mic-ready', { round: hostPrepare.round });
+        guest.emit('round:mic-ready', { round: guestPrepare.round });
+
+        const [hostStart, guestStart] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:start', 5000),
+          waitFor<{ round: number }>(guest, 'round:start', 5000),
+        ]);
+        expect(hostStart.round).toBe(1);
+        expect(guestStart.round).toBe(1);
+      },
+      10_000,
+    );
+
+    it(
+      '잘못된 round 번호로 mic-ready → 무시, round:start 미수신',
+      async () => {
+        const { host, guest } = await setupRoom(408, 409);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [, guestPrepare] = await Promise.all([
+          waitFor(host, 'round:prepare', 7000),
+          waitFor<{ round: number }>(guest, 'round:prepare', 7000),
+        ]);
+
+        // host가 잘못된 라운드 번호(0)로 mic-ready 전송
+        host.emit('round:mic-ready', { round: 0 });
+        guest.emit('round:mic-ready', { round: guestPrepare.round });
+
+        // round:start가 오지 않아야 함 (2초 관찰, prepare timeout=8s 이전)
+        let startReceived = false;
+        host.once('round:start', () => { startReceived = true; });
+        await delay(2000);
+        expect(startReceived).toBe(false);
+      },
+      10_000,
+    );
+  });
+
+  /* ═══════════════════════════════════════════════════════════════
+   * 6. match:prepare-failed — 공식 라운드 전 준비 실패
+   * ═══════════════════════════════════════════════════════════════ */
+  describe('match:prepare-failed — 공식 라운드 전 준비 실패', () => {
+    beforeEach(() => {
+      mockUserRepo.findProfileByUserId.mockImplementation((id: number) =>
+        Promise.resolve(fakeProfile(`user-${id}`)),
+      );
+    });
+
+    it(
+      '첫 라운드 전 1명 mic-error → 양쪽 match:prepare-failed 수신, game:over 없음, room state = ready',
+      async () => {
+        const { host, guest } = await setupRoom(500, 501);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        const hostGameOvers: unknown[] = [];
+        const guestGameOvers: unknown[] = [];
+        host.on('game:over', d => hostGameOvers.push(d));
+        guest.on('game:over', d => guestGameOvers.push(d));
+
+        // host가 mic-error 전송 → 공식 라운드 전이므로 match:prepare-failed
+        const [hFailed, gFailed] = await Promise.all([
+          waitFor<{ reason: string; retryable: boolean; resetTo: string; failedUserIds: number[] }>(
+            host, 'match:prepare-failed', 3000,
+          ),
+          waitFor<{ reason: string; retryable: boolean; resetTo: string }>(
+            guest, 'match:prepare-failed', 3000,
+          ),
+          Promise.resolve(host.emit('round:mic-error', { round: hostPrepare.round })),
+        ]);
+
+        expect(hFailed.reason).toBe('mic_prepare_failed');
+        expect(hFailed.retryable).toBe(true);
+        expect(hFailed.resetTo).toBe('match_ready');
+        expect(gFailed.reason).toBe('mic_prepare_failed');
+
+        // game:over는 없어야 함
+        await delay(300);
+        expect(hostGameOvers).toHaveLength(0);
+        expect(guestGameOvers).toHaveLength(0);
+      },
+      15_000,
+    );
+
+    it(
+      '첫 라운드 전 양쪽 mic timeout → 양쪽 match:prepare-failed 수신, game:over 없음',
+      async () => {
+        const { host, guest } = await setupRoom(502, 503);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        const [hostPrepare] = await Promise.all([
+          waitFor<{ round: number; prepareTimeoutMs: number }>(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        const hostGameOvers: unknown[] = [];
+        const guestGameOvers: unknown[] = [];
+        host.on('game:over', d => hostGameOvers.push(d));
+        guest.on('game:over', d => guestGameOvers.push(d));
+
+        // 아무도 mic-ready 전송 안 함 → timeout 후 match:prepare-failed
+        const [hFailed, gFailed] = await Promise.all([
+          waitFor<{ reason: string; retryable: boolean }>(
+            host, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+          waitFor<{ reason: string; retryable: boolean }>(
+            guest, 'match:prepare-failed', hostPrepare.prepareTimeoutMs + 3000,
+          ),
+        ]);
+
+        expect(hFailed.reason).toBe('mic_prepare_failed');
+        expect(hFailed.retryable).toBe(true);
+        expect(gFailed.reason).toBe('mic_prepare_failed');
+
+        // game:over 없음
+        await delay(300);
+        expect(hostGameOvers).toHaveLength(0);
+        expect(guestGameOvers).toHaveLength(0);
+      },
+      15_000,
+    );
+
+    it(
+      '첫 라운드 전 room:leave (guest) → host에게 opponent:left, forfeit 없음',
+      async () => {
+        const { host, guest } = await setupRoom(504, 505);
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        await Promise.all([
+          waitFor(host, 'round:prepare', 7000),
+          waitFor(guest, 'round:prepare', 7000),
+        ]);
+
+        const hostGameOvers: unknown[] = [];
+        host.on('game:over', d => hostGameOvers.push(d));
+
+        // guest가 room:leave → officialRoundStarted=false이므로 forfeit 없음
+        const opponentLeftPromise = waitFor(host, 'opponent:left', 3000);
+        guest.emit('room:leave');
+        await opponentLeftPromise;
+
+        // game:over는 없어야 함
+        await delay(300);
+        expect(hostGameOvers).toHaveLength(0);
+      },
+      15_000,
+    );
+
+    it(
+      '공식 라운드 시작 후 1명 mic timeout → forfeit (기존 동작)',
+      async () => {
+        const { host, guest } = await setupRoom(506, 507);
+
+        // 1라운드 완전 진행 (officialRoundStarted=true 이후)
+        const submitRound = async (round: number) => {
+          const [hostPrep, guestPrep] = await Promise.all([
+            waitFor<{ round: number }>(host, 'round:prepare', 10_000),
+            waitFor<{ round: number }>(guest, 'round:prepare', 10_000),
+          ]);
+          host.emit('round:mic-ready', { round: hostPrep.round });
+          guest.emit('round:mic-ready', { round: guestPrep.round });
+          await Promise.all([
+            waitFor(host, 'round:start', 7000),
+            waitFor(guest, 'round:start', 7000),
+          ]);
+          host.emit('round:submit', { round, peakDb: 90 });
+          guest.emit('round:submit', { round, peakDb: 60 });
+          await Promise.all([
+            waitFor(host, 'round:result', 3000),
+            waitFor(guest, 'round:result', 3000),
+          ]);
+        };
+
+        host.emit('game:ready');
+        guest.emit('game:ready');
+        await submitRound(1); // officialRoundStarted=true 이후
+
+        // 2라운드 prepare: guest만 mic-ready 전송, host는 안 함 → 타임아웃 시 forfeit
+        const [, guestPrep2] = await Promise.all([
+          waitFor<{ round: number; prepareTimeoutMs: number }>(host, 'round:prepare', 10_000),
+          waitFor<{ round: number; prepareTimeoutMs: number }>(guest, 'round:prepare', 10_000),
+        ]);
+        guest.emit('round:mic-ready', { round: guestPrep2.round });
+
+        // officialRoundStarted=true이므로 기존 forfeit 발생
+        const guestGameOver = await waitFor<{ result: string; forfeit: boolean }>(
+          guest, 'game:over', guestPrep2.prepareTimeoutMs + 3000,
+        );
+        expect(guestGameOver.result).toBe('win');
+        expect(guestGameOver.forfeit).toBe(true);
+      },
+      40_000,
+    );
+
+    it(
+      '공식 라운드 시작 후 room:leave → forfeit (기존 동작)',
+      async () => {
+        const { host, guest } = await setupRoom(508, 509);
+        await startGame(host, guest); // round:start 수신까지 진행 (officialRoundStarted=true)
+
+        const gameOverPromise = waitFor<{ result: string; forfeit: boolean }>(host, 'game:over', 3000);
+        guest.emit('room:leave');
+
+        const gameOver = await gameOverPromise;
+        expect(gameOver.result).toBe('win');
+        expect(gameOver.forfeit).toBe(true);
+      },
+      15_000,
+    );
+  });
+
+  /* ═══════════════════════════════════════════════════════════════
+   * 8. Disconnect / Forfeit  (실제 5s 타이머 → 느림)
    * ═══════════════════════════════════════════════════════════════ */
   describe('Disconnect handling', () => {
     beforeEach(() => {
@@ -621,12 +1084,7 @@ describe('GameGateway (integration)', () => {
       async () => {
         const { host, guest } = await setupRoom(210, 211);
 
-        await Promise.all([
-          waitFor(host, 'round:start', 7000),
-          waitFor(guest, 'round:start', 7000),
-          Promise.resolve(host.emit('game:ready')),
-          Promise.resolve(guest.emit('game:ready')),
-        ]);
+        await startGame(host, guest);
 
         const noticePromise = waitFor<{ waitSecs: number }>(host, 'opponent:disconnected', 3000);
         guest.disconnect();
@@ -642,12 +1100,7 @@ describe('GameGateway (integration)', () => {
       async () => {
         const { host, guest } = await setupRoom(220, 221);
 
-        await Promise.all([
-          waitFor(host, 'round:start', 7000),
-          waitFor(guest, 'round:start', 7000),
-          Promise.resolve(host.emit('game:ready')),
-          Promise.resolve(guest.emit('game:ready')),
-        ]);
+        await startGame(host, guest);
 
         guest.disconnect();
 
@@ -668,12 +1121,7 @@ describe('GameGateway (integration)', () => {
       async () => {
         const { host, guest } = await setupRoom(230, 231);
 
-        await Promise.all([
-          waitFor(host, 'round:start', 7000),
-          waitFor(guest, 'round:start', 7000),
-          Promise.resolve(host.emit('game:ready')),
-          Promise.resolve(guest.emit('game:ready')),
-        ]);
+        await startGame(host, guest);
 
         // guest 연결 끊김
         guest.disconnect();
@@ -748,7 +1196,7 @@ describe('GameGateway (integration)', () => {
   });
 
   /* ═══════════════════════════════════════════════════════════════
-   * 6. room:leave (명시적 이탈)
+   * 9. room:leave (명시적 이탈)
    * ═══════════════════════════════════════════════════════════════ */
   describe('room:leave', () => {
     beforeEach(() => {
@@ -764,6 +1212,12 @@ describe('GameGateway (integration)', () => {
 
         // 3라운드 완료해서 game_over 도달
         const submitRound = async (round: number) => {
+          const [hostPrep, guestPrep] = await Promise.all([
+            waitFor<{ round: number }>(host, 'round:prepare', 10_000),
+            waitFor<{ round: number }>(guest, 'round:prepare', 10_000),
+          ]);
+          host.emit('round:mic-ready', { round: hostPrep.round });
+          guest.emit('round:mic-ready', { round: guestPrep.round });
           await Promise.all([waitFor(host, 'round:start', 7000), waitFor(guest, 'round:start', 7000)]);
           host.emit('round:submit', { round, peakDb: 90 });
           guest.emit('round:submit', { round, peakDb: 60 });
