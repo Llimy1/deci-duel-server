@@ -5,6 +5,7 @@ export enum AuthExceptionMessage {
   DUPLICATE_ID = '이미 사용 중인 아이디입니다.',
   OAUTH_INVALID_TOKEN = 'OAuth 토큰 검증에 실패했습니다.',
   OAUTH_UNSUPPORTED_PROVIDER = '지원하지 않는 OAuth 제공자입니다.',
+  OAUTH_TOKEN_REQUIRED = 'provider에 필요한 토큰이 누락되었습니다.',
   SIGNUP_TOKEN_INVALID = '유효하지 않은 가입 토큰입니다.',
 }
 

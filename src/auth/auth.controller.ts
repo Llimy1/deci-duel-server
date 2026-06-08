@@ -1,19 +1,14 @@
 import {
   Body,
   Controller,
-  Get,
   HttpCode,
   HttpStatus,
   Post,
-  Query,
   Req,
-  Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import {
-  ExchangeAuthCodeRequest,
   OAuthLoginRequest,
   OAuthSignupRequest,
   RefreshRequest,
@@ -32,61 +27,10 @@ import * as authRequestInterface from '../common/interfaces/auth-request.interfa
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  // ─── 서버사이드 Kakao OAuth ──────────────────────────────────────
-
-  @Get('oauth/kakao/init')
-  async kakaoInit(
-    @Query('redirectUri') redirectUri: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    const url = this.authService.kakaoInitUrl(redirectUri);
-    res.redirect(url);
-  }
-
-  @Get('oauth/kakao/callback')
-  async kakaoCallback(
-    @Query('code') code: string,
-    @Query('state') state: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    const redirectUrl = await this.authService.kakaoCallback(code, state);
-    res.redirect(redirectUrl);
-  }
-
-  @Post('oauth/exchange')
-  @HttpCode(HttpStatus.OK)
-  async exchangeAuthCode(
-    @Body() dto: ExchangeAuthCodeRequest,
-  ): Promise<ApiResponse<OAuthLoginResponse>> {
-    const result = this.authService.exchangeAuthCode(dto.code);
-    const message = result.isNewUser
-      ? AuthResponseMessage.OAUTH_NEW_USER
-      : AuthResponseMessage.LOGIN_SUCCESS;
-    return new ApiResponse(HttpStatus.OK, message, result);
-  }
-
-  // ─── 서버사이드 Google OAuth ─────────────────────────────────────
-
-  @Get('oauth/google/init')
-  async googleInit(
-    @Query('redirectUri') redirectUri: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    const url = this.authService.googleInitUrl(redirectUri);
-    res.redirect(url);
-  }
-
-  @Get('oauth/google/callback')
-  async googleCallback(
-    @Query('code') code: string,
-    @Query('state') state: string,
-    @Res() res: Response,
-  ): Promise<void> {
-    const redirectUrl = await this.authService.googleCallback(code, state);
-    res.redirect(redirectUrl);
-  }
-
-  // ─── 기존 앱사이드 OAuth (Apple 용도 유지) ───────────────────────
+  // ─── 네이티브 SDK 기반 OAuth (Apple/Google/Kakao 공통 진입점) ────
+  // NOTE: 과거 서버사이드 Authorization Code Flow 엔드포인트
+  // (oauth/kakao/init|callback, oauth/google/init|callback, oauth/exchange)는
+  // 네이티브 SDK 전환(2026-06-07)에 따라 제거됨. 앱은 더 이상 호출하지 않음.
 
   @Post('oauth')
   @HttpCode(HttpStatus.OK)

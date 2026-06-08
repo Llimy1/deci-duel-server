@@ -33,12 +33,6 @@ export class OAuthSignupRequest {
   privacyVersion: string;
 }
 
-export class ExchangeAuthCodeRequest {
-  @IsString()
-  @MinLength(1)
-  code: string;
-}
-
 export class RefreshRequest {
   @IsString()
   @MinLength(1, { message: '리프레시 토큰을 입력해주세요.' })

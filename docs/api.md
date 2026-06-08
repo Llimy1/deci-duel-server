@@ -19,20 +19,32 @@
 {
   "statusCode": 200,         // 또는 201 (생성)
   "message": "...",          // 사람이 읽는 메시지(한국어, enum 기반)
-  "data": { /* T */ }
+  "data": { /* T */ },
+  "requestId": "req_<uuid>"  // (2026-06-07 추가) 아래 "요청 추적 (requestId)" 참고. 컨텍스트가 없으면 직렬화 시 생략됨
 }
 ```
 
 ### 실패
-`HttpExceptionFilter`가 모든 `HttpException`을 동일 포맷으로 변환한다.
+`HttpExceptionFilter`/`AllExceptionsFilter`가 모든 예외를 동일 포맷으로 변환한다.
 
 ```jsonc
 {
   "statusCode": 401,         // 4xx/5xx
   "message": "유효하지 않은 토큰입니다",
-  "data": null               // 항상 null
+  "data": null,              // 항상 null
+  "requestId": "req_<uuid>"  // (2026-06-07 추가) 컨텍스트가 없으면 생략됨
 }
 ```
+
+### 요청 추적 (requestId) — (2026-06-07 추가)
+
+모든 HTTP 요청은 `RequestContextMiddleware`에서 requestId를 부여받고, `AsyncLocalStorage`로 요청 전체에 전파된다.
+
+- 클라이언트가 `x-request-id` 헤더로 유효한 값(정규식 `/^[a-zA-Z0-9_.-]{1,128}$/`, 최대 128자)을 보내면 그대로 사용
+- 없거나 형식이 올바르지 않으면 서버가 생성: `req_<uuid>`
+- 응답 헤더 `x-request-id`에 동일 값이 항상 포함됨 (앱-서버 간 이슈 추적 시 이 값으로 서버 로그 검색 가능)
+- 모든 성공/실패 응답 본문에 `requestId` 필드가 포함됨 (값이 없을 이론적 경우에만 직렬화 시 생략 — 실제로는 미들웨어가 항상 부여하므로 거의 발생하지 않음)
+- **앱 변경 불필요**: 기존 `ApiResponse` 파서는 옵셔널 필드를 무시하므로 호환성 깨짐 없음. 단, 향후 에러 리포팅/문의 응대 시 `requestId`를 함께 받으면 서버 로그 추적이 쉬워짐 (선택적으로 활용 권장)
 
 ### 공통 에러 코드
 
@@ -42,6 +54,7 @@
 | 401 | Unauthorized | 토큰 부재/만료/위조/재사용 |
 | 404 | Not Found | 자원 없음 (계정/다이어리/기록) |
 | 409 | Conflict | 닉네임/아이디 중복 |
+| 429 | Too Many Requests | (2026-06-07 추가) Admin 로그인 시도 횟수 초과 (rate limit) |
 | 500 | Internal | 서버 내부 오류 |
 
 > **현재 401은 만료/위조/재사용을 message로 구분하지 않는다.** 모두 `'유효하지 않은 토큰입니다'`. (개선 시 별도 코드 도입 검토)
@@ -50,45 +63,77 @@
 
 ## 인증 (Auth)
 
-### POST `/auth/dev/signup`
-
-개발용 회원가입. (소셜 OAuth는 추후)
-
-**Request body**
-```ts
-{ id: string; password: string; nickname: string }
-```
-
-**Response 201**
-```ts
-{
-  statusCode: 201,
-  message: "회원가입에 성공했습니다.",
-  data: { accessToken: string; refreshToken: string; user: { id: number; nickname: string } }
-}
-```
-
-**Errors**
-- 409 `이미 사용 중인 아이디입니다.`
+> **OAuth 네이티브 SDK 전환 완료 (2026-06-07)**
+> `dev/signup` / `dev/login` 제거됨. Apple/Google/Kakao 모두 **네이티브 SDK 기반 로그인**으로 통일.
+> DB: `auth_provider`, `provider_id` 컬럼. `dev_id`, `dev_password` 삭제.
+>
+> ⚠️ **DEPRECATED & REMOVED (2026-06-07)** — 아래 서버사이드 Authorization Code Flow 엔드포인트는 제거되었습니다. 앱은 더 이상 호출하지 않습니다 (Expo Go 호환을 위한 임시 방식이었음):
+> - `GET /auth/oauth/kakao/init`, `GET /auth/oauth/kakao/callback`
+> - `GET /auth/oauth/google/init`, `GET /auth/oauth/google/callback`
+> - `POST /auth/oauth/exchange`
+>
+> 대신 앱이 Apple/Google/Kakao **네이티브 SDK**로 직접 `idToken`(Apple/Google) 또는 `accessToken`(Kakao)을 발급받아 아래 통합 엔드포인트 `POST /auth/oauth`로 전달합니다.
 
 ---
 
-### POST `/auth/dev/login`
+### POST `/auth/oauth` (Apple/Google/Kakao 공통 진입점)
+
+네이티브 SDK가 발급한 토큰을 서버에서 검증 후 로그인 처리.
+
+- Apple: `expo-apple-authentication`의 `identityToken` → JWKS(`appleid.apple.com`) 검증 (issuer + audience)
+- Google: `@react-native-google-signin/google-signin`의 `idToken` → JWKS(`googleapis.com`) 검증 (issuer + audience)
+- Kakao: `@react-native-kakao/user`의 `accessToken` → Kakao `/v1/user/access_token_info`로 토큰 발급 앱(`app_id`) 검증 후 `/v2/user/me` REST API로 providerId(`id`) 확인
 
 **Request body**
 ```ts
-{ id: string; password: string }
+{ provider: 'apple' | 'google'; idToken: string }
+// 또는
+{ provider: 'kakao'; accessToken: string }
 ```
 
 **Response 200**
 ```ts
+// 기존 유저
 { statusCode: 200, message: "로그인에 성공했습니다.",
-  data: { accessToken, refreshToken, user: { id, nickname } } }
+  data: { isNewUser: false, accessToken: string, refreshToken: string,
+          user: { id: number, nickname: string } } }
+
+// 신규 유저
+{ statusCode: 200, message: "신규 사용자입니다. 회원가입을 완료해주세요.",
+  data: { isNewUser: true, signupToken: string, provider: 'apple' | 'google' | 'kakao' } }
 ```
 
 **Errors**
-- 404 `존재하지 않는 계정입니다`
-- 401 `비밀번호가 틀렸습니다`
+- 400 `provider에 필요한 토큰이 누락되었습니다.` — Apple/Google에 `idToken` 없음, Kakao에 `accessToken` 없음
+- 400 `지원하지 않는 OAuth 제공자입니다.` — `provider`가 `apple`/`google`/`kakao` 외의 값
+- 401 `OAuth 토큰 검증에 실패했습니다.` — JWKS issuer/audience 불일치, Kakao API 호출 실패, 토큰 만료/위조 등
+
+**Audience(aud) 검증**
+- Apple: `APPLE_ALLOWED_AUDIENCES` (앱 Bundle Identifier, 예: `com.deciduel.app`)
+- Google: `GOOGLE_ALLOWED_CLIENT_IDS` (네이티브 SDK `webClientId`/iOS/Android 클라이언트 ID, 콤마 구분 허용 목록)
+- Kakao: `KAKAO_APP_ID` (Kakao Developers 앱 ID, `/v1/user/access_token_info` 응답의 `app_id`와 비교)
+- env 미설정 시 검증을 스킵함 (로컬 개발 한정 — `OAUTH_AUDIENCE_REQUIRED=true` 또는 `NODE_ENV=production`에서는 allowlist 누락 시 401)
+
+---
+
+### POST `/auth/oauth/signup`
+
+OAuth 신규 유저 회원가입 완료.
+
+**Request body**
+```ts
+{ signupToken: string; nickname: string; termsVersion: string; privacyVersion: string }
+```
+
+**Response 201**
+```ts
+{ statusCode: 201, message: "회원가입에 성공했습니다.",
+  data: { accessToken: string, refreshToken: string, user: { id: number, nickname: string } } }
+```
+
+**Errors**
+- 401 `signupToken이 유효하지 않습니다` — 만료(15분) 또는 위조
+- 409 `이미 가입된 계정입니다`
 
 ---
 
@@ -494,6 +539,130 @@ waiting → ready → countdown → playing → round_end ┐
 
 ---
 
+## 관리자 (Admin) — (2026-06-07 추가)
+
+> **Phase 2 MVP.** 일반 유저 인증과 완전히 분리된 별도 시스템이다.
+> - Admin JWT는 일반 유저 JWT(`JWT_SECRET`)와 **다른 secret**(`ADMIN_JWT_SECRET`)으로 서명되며, payload 형태도 다르다 (`{ type: 'admin', role: 'owner' }` vs `{ sub, nickname }`).
+> - `AdminJwtGuard`/`AdminJwtStrategy`(`admin-jwt`)가 토큰 타입을 엄격히 구분 — 일반 유저 토큰으로는 `/admin/*` 보호 엔드포인트에 접근 불가 (401).
+> - **앱(`deci-duel-app`)에서 호출할 일 없음** — 별도 관리자 도구/대시보드 전용. 일반 유저 플로우에 영향 없음.
+> - 절대 로그/메타데이터에 남기지 않는 값: 관리자 접속 코드(`ADMIN_ACCESS_CODE`) 원문, JWT 토큰 원문.
+
+### POST `/admin/auth/login`
+
+관리자 접속 코드(`ADMIN_ACCESS_CODE`)를 검증해 admin 전용 JWT를 발급한다.
+
+**인증**: 불필요 (코드 자체가 인증 수단)
+
+**Request body**
+```ts
+{ code: string }  // 최소 1자
+```
+
+**Response 200**
+```ts
+{
+  statusCode: 200,
+  message: "관리자 로그인에 성공했습니다.",
+  data: { accessToken: string; expiresIn: number }  // expiresIn: 초 단위, 기본 3600 (ADMIN_TOKEN_EXPIRES_IN으로 조정)
+}
+```
+
+**Errors**
+- 400 `code must be longer than or equal to 1 characters` — 코드 누락/빈 문자열
+- 401 `관리자 코드가 올바르지 않습니다.` — 코드 불일치 또는 `ADMIN_ACCESS_CODE` 미설정
+- 429 `잠시 후 다시 시도해주세요.` — 동일 IP 기준 5분 내 5회 실패 시 rate limit (메모리 기반, 서버 재시작 시 초기화)
+
+> 로그인 성공 시 실패 카운터가 리셋된다. 코드 비교는 `timingSafeEqual` 기반 상수 시간 비교로 타이밍 사이드채널을 방지한다.
+
+---
+
+### GET `/admin/health`
+
+서버 운영 상태 스냅샷 조회.
+
+**인증**: Bearer 필요 (admin JWT, `AdminJwtGuard`)
+
+**Response 200**
+```ts
+{
+  statusCode: 200,
+  message: "서버 상태 조회에 성공했습니다.",
+  data: {
+    ok: boolean;                 // db.status === 'ok'
+    uptimeSeconds: number;
+    memory: { rssMb: number; heapUsedMb: number; heapTotalMb: number };
+    nodeEnv: string;
+    serverVersion: string;       // package.json version
+    db: { status: 'ok' | 'error'; latencyMs?: number };  // SELECT 1 라운드트립
+    game: { roomCount: number; connectedSocketCount: number; activePlayerCount: number };
+  }
+}
+```
+
+**Errors**
+- 401 — 토큰 없음 / 일반 유저 토큰 / 잘못된 secret으로 서명된 토큰 (admin 토큰이 아닌 모든 경우)
+
+---
+
+### GET `/admin/events`
+
+`OperationalEvent` 운영 이벤트 조회 (커서 기반 페이지네이션).
+
+**인증**: Bearer 필요 (admin JWT, `AdminJwtGuard`)
+
+**Query params** (모두 선택)
+```ts
+{
+  level?: 'info' | 'warn' | 'error';
+  category?: 'auth' | 'admin' | 'http' | 'socket' | 'game' | 'system' | 'storage';
+  event?: string;          // 정확히 일치
+  userId?: number;
+  requestId?: string;
+  from?: string;           // ISO8601, createdAt >= from
+  to?: string;             // ISO8601, createdAt <= to
+  limit?: number;          // 기본 50, 최대 200 (초과 시 200으로 clamp)
+  cursor?: number;         // 이전 응답의 nextCursor (id 기준)
+}
+```
+
+**Response 200**
+```ts
+{
+  statusCode: 200,
+  message: "운영 이벤트 조회에 성공했습니다.",
+  data: {
+    items: Array<{
+      id: number; level: string; category: string; event: string;
+      message: string | null; userId: number | null; requestId: string | null;
+      roomCode: string | null; metadata: unknown; createdAt: Date;
+    }>;
+    nextCursor: number | null;  // 다음 페이지 cursor (없으면 null)
+    hasMore: boolean;
+  }
+}
+```
+
+**Errors**
+- 401 — 토큰 없음 / 일반 유저 토큰
+
+> **metadata 안전성**: `OperationalEventService.record()`가 저장 시 `accessToken`/`refreshToken`/`idToken`/`password`/`secret` 계열 키를 재귀적으로 `[REDACTED]`로 치환한다 (`sanitizeMetadata`). 토큰/코드/요청 본문 원문은 어떤 이벤트에도 절대 저장되지 않는다.
+
+### OperationalEvent — 저장 대상 이벤트 (요약)
+
+`category`별 주요 `event` 예시 (전체 목록은 코드 주석 참고):
+
+| category | event 예시 |
+|---|---|
+| `admin` | `admin_login_success`, `admin_login_failed`, `admin_login_rate_limited` |
+| `auth` | (기존 인증 흐름의 의미 있는 실패/성공 이벤트) |
+| `socket` | `socket_connect_rejected`, `socket_connected`, `socket_disconnected`, `socket_reconnected` |
+| `game` | `room_create_failed`, `room_created`, `room_join_failed`, `room_joined`, `round_mic_error`, `room_host_transferred`, `opponent_left`, `match_prepare_failed`, `game_forfeited`, `game_over` |
+
+> **저장 기준**: "관리자에게 의미 있는" 이벤트만 선별 저장한다. `opponent:db` 같은 고빈도 실시간 스트림, heartbeat성 이벤트는 제외. 모든 raw HTTP 요청 로그도 DB에 저장하지 않는다 (구조화 로그로만 남김).
+> **저장 실패 내성**: `record()`는 절대 throw하지 않는다 — DB 저장 실패 시에도 원 요청은 정상 처리되며, 실패 사실만 구조화 로그(`AppLogger`)로 남는다.
+
+---
+
 ## 변경 이력
 
 | 날짜 | 변경 | 작성자 |
@@ -509,3 +678,4 @@ waiting → ready → countdown → playing → round_end ┐
 | 2026-05-30 | 리더보드 스펙 정정: top 100 → 50, myEntry null → 항상 반환 (기록 없으면 bestDb:0), 순위 계산 방식 명시. | Claude |
 | 2026-06-01 | `room:joined`/`opponent:joined`에 `isHost`, `profileImageUrl` 추가. `room:reconnected` payload 전체 확장 (`isHost`, `myScore`, `oppScore`, `roundResults`, `opponent{profileImageUrl}`). 리더보드 entries/myEntry에 `profileImageUrl` 추가. | Claude |
 | 2026-06-03 | `officialRoundStarted` 플래그 도입. 공식 라운드 시작 전 mic 준비 실패 → `match:prepare-failed` (forfeit 없음, 방 유지). 이후 실패는 기존 forfeit 유지. `round:prepare`에 `remainingPrepareTimeoutMs` 추가. `round:mic-ready`, `round:mic-error` 이벤트 문서화. `match:prepare-failed` 이벤트 추가. `room:host_transferred` 이벤트 추가. 날짜 검증 강화 (월/일 범위 guard). | Claude |
+| 2026-06-07 | **Observability + Admin MVP (Codex 지시서 Phase 1+2)**: 모든 응답에 `requestId` 추가 (요청 추적, `x-request-id` 헤더 echo), 구조화 로깅(pino) 도입. `OperationalEvent` 도입 — 의미 있는 운영 이벤트만 DB 저장 (토큰/코드/요청 본문 원문 절대 미저장, 저장 실패가 원 요청에 영향 없음). 신규 Admin API 3종 추가: `POST /admin/auth/login`(접속 코드→admin JWT), `GET /admin/health`(서버 상태), `GET /admin/events`(운영 이벤트 조회). Admin JWT는 일반 유저 JWT와 완전 분리(별도 secret/payload/guard). 앱은 변경 불필요. | Claude |

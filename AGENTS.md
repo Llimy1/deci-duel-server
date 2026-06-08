@@ -9,8 +9,8 @@
 - docs/api.md 파괴적 변경 금지 (append/update만 허용)
 
 ## 파일 접근 제한
-- 수정 허용: src/, prisma/, test/, docs/, .claude/
-- 수정 금지: node_modules/, dist/, .env, .env.*
+- 수정 허용: src/, prisma/, test/, docs/, .claude/, .env.example
+- 수정 금지: node_modules/, dist/, .env, .env.* (단, .env.example은 예외적으로 수정 가능)
 
 ## 협업 규칙
 - API 변경 시 docs/api.md 동기화 필수

@@ -1,4 +1,3 @@
-import * as crypto from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -19,131 +18,20 @@ import {
   RefreshResponse,
 } from './dto/response/auth.response';
 import { RefreshRequest } from './dto/request/auth.request';
-
-interface PendingState {
-  redirectUri: string;
-  expiresAt: number;
-}
-
-interface PendingAuthCode {
-  result: OAuthLoginResponse;
-  expiresAt: number;
-}
-
-const ALLOWED_REDIRECT_SCHEMES = ['deciduelapp://', 'exp://'];
+import { OperationalEventService } from '../common/operational-event/operational-event.service';
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
-  private readonly pendingStates = new Map<string, PendingState>();
-  private readonly pendingAuthCodes = new Map<string, PendingAuthCode>();
 
   constructor(
     private readonly userRepository: UserRepository,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly operationalEvents: OperationalEventService,
   ) {}
 
-  // ─── 서버사이드 Kakao OAuth ──────────────────────────────────────
-
-  kakaoInitUrl(redirectUri: string): string {
-    const state = this.createOAuthState(redirectUri);
-    const params = new URLSearchParams({
-      client_id: this.configService.get<string>('KAKAO_CLIENT_ID')!,
-      redirect_uri: this.configService.get<string>('KAKAO_REDIRECT_URI')!,
-      response_type: 'code',
-      state,
-    });
-    return `https://kauth.kakao.com/oauth/authorize?${params}`;
-  }
-
-  async kakaoCallback(code: string, state: string): Promise<string> {
-    const { redirectUri, errorUrl } = this.consumeOAuthState(state);
-    if (errorUrl) return errorUrl;
-    const sep = redirectUri!.includes('?') ? '&' : '?';
-
-    try {
-      const body = new URLSearchParams({
-        grant_type: 'authorization_code',
-        client_id: this.configService.get<string>('KAKAO_CLIENT_ID')!,
-        redirect_uri: this.configService.get<string>('KAKAO_REDIRECT_URI')!,
-        code,
-      });
-      const clientSecret = this.configService.get<string>('KAKAO_CLIENT_SECRET');
-      if (clientSecret) body.set('client_secret', clientSecret);
-
-      const tokenRes = await fetch('https://kauth.kakao.com/oauth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8' },
-        body: body.toString(),
-      });
-      if (!tokenRes.ok) throw new Error(`Kakao token exchange ${tokenRes.status}`);
-
-      const { access_token } = (await tokenRes.json()) as { access_token: string };
-      const providerId = await this.verifyKakaoToken(access_token);
-      return this.buildAuthCodeRedirect('kakao', providerId, redirectUri!, sep);
-    } catch (err) {
-      this.logger.error('Kakao 콜백 처리 실패', err);
-      return `${redirectUri}${sep}error=oauth_failed`;
-    }
-  }
-
-  // ─── 서버사이드 Google OAuth ─────────────────────────────────────
-
-  googleInitUrl(redirectUri: string): string {
-    const state = this.createOAuthState(redirectUri);
-    const params = new URLSearchParams({
-      client_id: this.configService.get<string>('GOOGLE_CLIENT_ID')!,
-      redirect_uri: this.configService.get<string>('GOOGLE_REDIRECT_URI')!,
-      response_type: 'code',
-      scope: 'openid',
-      state,
-      access_type: 'online',
-    });
-    return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
-  }
-
-  async googleCallback(code: string, state: string): Promise<string> {
-    const { redirectUri, errorUrl } = this.consumeOAuthState(state);
-    if (errorUrl) return errorUrl;
-    const sep = redirectUri!.includes('?') ? '&' : '?';
-
-    try {
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          client_id: this.configService.get<string>('GOOGLE_CLIENT_ID')!,
-          client_secret: this.configService.get<string>('GOOGLE_CLIENT_SECRET')!,
-          redirect_uri: this.configService.get<string>('GOOGLE_REDIRECT_URI')!,
-          code,
-        }).toString(),
-      });
-      if (!tokenRes.ok) throw new Error(`Google token exchange ${tokenRes.status}`);
-
-      const { id_token } = (await tokenRes.json()) as { id_token: string };
-      const providerId = await this.verifyGoogleToken(id_token);
-      return this.buildAuthCodeRedirect('google', providerId, redirectUri!, sep);
-    } catch (err) {
-      this.logger.error('Google 콜백 처리 실패', err);
-      return `${redirectUri}${sep}error=oauth_failed`;
-    }
-  }
-
-  // ─── auth code 교환 ──────────────────────────────────────────────
-
-  exchangeAuthCode(code: string): OAuthLoginResponse {
-    const entry = this.pendingAuthCodes.get(code);
-    if (!entry || Date.now() > entry.expiresAt) {
-      this.pendingAuthCodes.delete(code);
-      throw new UnauthorizedException(AuthExceptionMessage.OAUTH_INVALID_TOKEN);
-    }
-    this.pendingAuthCodes.delete(code);
-    return entry.result;
-  }
-
-  // ─── 기존 앱사이드 OAuth (Apple 용도 유지) ───────────────────────
+  // ─── 네이티브 SDK 기반 OAuth (Apple/Google/Kakao 공통) ───────────
 
   async oauthLogin(
     provider: OAuthProvider,
@@ -215,36 +103,6 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  private createOAuthState(redirectUri: string): string {
-    if (!ALLOWED_REDIRECT_SCHEMES.some((s) => redirectUri.startsWith(s))) {
-      throw new BadRequestException('허용되지 않은 redirect URI입니다.');
-    }
-    const state = crypto.randomUUID();
-    this.pendingStates.set(state, { redirectUri, expiresAt: Date.now() + 5 * 60_000 });
-    return state;
-  }
-
-  private consumeOAuthState(state: string): { redirectUri?: string; errorUrl?: string } {
-    const entry = this.pendingStates.get(state);
-    this.pendingStates.delete(state);
-    if (!entry || Date.now() > entry.expiresAt) {
-      return { errorUrl: 'deciduelapp://oauth/callback?error=invalid_state' };
-    }
-    return { redirectUri: entry.redirectUri };
-  }
-
-  private async buildAuthCodeRedirect(
-    provider: OAuthProvider,
-    providerId: string,
-    redirectUri: string,
-    sep: string,
-  ): Promise<string> {
-    const result = await this.processOAuthUser(provider, providerId);
-    const authCode = crypto.randomUUID();
-    this.pendingAuthCodes.set(authCode, { result, expiresAt: Date.now() + 60_000 });
-    return `${redirectUri}${sep}code=${authCode}`;
-  }
-
   private async processOAuthUser(
     provider: OAuthProvider,
     providerId: string,
@@ -290,13 +148,49 @@ export class AuthService {
   ): Promise<string> {
     switch (provider) {
       case 'apple':
-        return this.verifyAppleToken(idToken!);
+        if (!idToken) throw new BadRequestException(AuthExceptionMessage.OAUTH_TOKEN_REQUIRED);
+        return this.verifyAppleToken(idToken);
       case 'google':
-        return this.verifyGoogleToken(idToken!);
+        if (!idToken) throw new BadRequestException(AuthExceptionMessage.OAUTH_TOKEN_REQUIRED);
+        return this.verifyGoogleToken(idToken);
       case 'kakao':
-        return this.verifyKakaoToken(accessToken!);
+        if (!accessToken) throw new BadRequestException(AuthExceptionMessage.OAUTH_TOKEN_REQUIRED);
+        return this.verifyKakaoToken(accessToken);
       default:
         throw new BadRequestException(AuthExceptionMessage.OAUTH_UNSUPPORTED_PROVIDER);
+    }
+  }
+
+  /** ',' 구분 env 문자열 → trim된 비어있지 않은 문자열 배열 */
+  private parseAllowedAudiences(envKey: string): string[] {
+    const raw = this.configService.get<string>(envKey);
+    if (!raw) return [];
+    return raw
+      .split(',')
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+  }
+
+  private isAudienceRequired(): boolean {
+    return (
+      this.configService.get<string>('OAUTH_AUDIENCE_REQUIRED') === 'true' ||
+      this.configService.get<string>('NODE_ENV') === 'production'
+    );
+  }
+
+  private assertAudienceAllowed(aud: unknown, allowed: string[], providerLabel: string): void {
+    if (allowed.length === 0) {
+      if (this.isAudienceRequired()) {
+        this.logger.error(`${providerLabel} audience allowlist is missing`);
+        throw new Error('audience allowlist missing');
+      }
+      return;
+    }
+    const audList = Array.isArray(aud) ? aud : [aud];
+    const matched = audList.some((a) => typeof a === 'string' && allowed.includes(a));
+    if (!matched) {
+      this.logger.warn(`${providerLabel} audience mismatch: aud=${JSON.stringify(aud)}`);
+      throw new Error('audience mismatch');
     }
   }
 
@@ -307,9 +201,15 @@ export class AuthService {
         issuer: 'https://appleid.apple.com',
       });
       if (!payload.sub) throw new Error('sub missing');
+      this.assertAudienceAllowed(
+        payload.aud,
+        this.parseAllowedAudiences('APPLE_ALLOWED_AUDIENCES'),
+        'Apple',
+      );
       return payload.sub;
     } catch (err) {
       this.logger.error('Apple 토큰 검증 실패', err);
+      await this.recordOAuthVerificationFailure('apple', err);
       throw new UnauthorizedException(AuthExceptionMessage.OAUTH_INVALID_TOKEN);
     }
   }
@@ -321,15 +221,23 @@ export class AuthService {
         issuer: ['accounts.google.com', 'https://accounts.google.com'],
       });
       if (!payload.sub) throw new Error('sub missing');
+      this.assertAudienceAllowed(
+        payload.aud,
+        this.parseAllowedAudiences('GOOGLE_ALLOWED_CLIENT_IDS'),
+        'Google',
+      );
       return payload.sub;
     } catch (err) {
       this.logger.error('Google 토큰 검증 실패', err);
+      await this.recordOAuthVerificationFailure('google', err);
       throw new UnauthorizedException(AuthExceptionMessage.OAUTH_INVALID_TOKEN);
     }
   }
 
   private async verifyKakaoToken(accessToken: string): Promise<string> {
     try {
+      await this.assertKakaoAccessTokenIssuedForApp(accessToken);
+
       const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
@@ -339,7 +247,48 @@ export class AuthService {
       return String(data.id);
     } catch (err) {
       this.logger.error('Kakao 토큰 검증 실패', err);
+      await this.recordOAuthVerificationFailure('kakao', err);
       throw new UnauthorizedException(AuthExceptionMessage.OAUTH_INVALID_TOKEN);
     }
+  }
+
+  private async assertKakaoAccessTokenIssuedForApp(accessToken: string): Promise<void> {
+    const allowedAppId = this.configService.get<string>('KAKAO_APP_ID')?.trim();
+
+    if (!allowedAppId) {
+      if (this.isAudienceRequired()) {
+        this.logger.error('Kakao app id allowlist is missing');
+        throw new Error('kakao app id allowlist missing');
+      }
+      return;
+    }
+
+    const res = await fetch('https://kapi.kakao.com/v1/user/access_token_info', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) throw new Error(`Kakao access token info API ${res.status}`);
+
+    const data = (await res.json()) as { app_id?: number | string };
+    const tokenAppId = data.app_id === undefined ? undefined : String(data.app_id);
+    if (tokenAppId !== allowedAppId) {
+      this.logger.warn(`Kakao app id mismatch: app_id=${tokenAppId ?? 'missing'}`);
+      throw new Error('kakao app id mismatch');
+    }
+  }
+
+  /**
+   * OAuth 토큰/audience 검증 실패를 운영 이벤트로 남긴다.
+   * token/idToken/accessToken 원문은 절대 metadata에 포함하지 않고,
+   * 실패 사유(reason)만 짧게 기록한다.
+   */
+  private async recordOAuthVerificationFailure(provider: OAuthProvider, err: unknown): Promise<void> {
+    const reason = err instanceof Error ? err.message : String(err);
+    await this.operationalEvents.record({
+      level: 'warn',
+      category: 'auth',
+      event: 'oauth_token_verification_failed',
+      message: `${provider} OAuth 토큰 검증 실패`,
+      metadata: { provider, reason },
+    });
   }
 }

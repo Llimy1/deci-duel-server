@@ -56,3 +56,26 @@ model DiaryRecord {
 
   @@unique([userId, date])
 }
+
+/// 관리자에게 의미 있는 운영 이벤트만 저장한다 (모든 HTTP raw 로그를 저장하지 않음).
+/// metadata에는 token/secret/body 원문을 절대 저장하지 않는다 — OperationalEventService에서 강제.
+model OperationalEvent {
+  id        Int      @id @default(autoincrement())
+  /// 'info' | 'warn' | 'error'
+  level     String
+  /// 'auth' | 'admin' | 'http' | 'socket' | 'game' | 'system' | 'storage'
+  category  String
+  event     String
+  message   String?
+  userId    Int?
+  requestId String?  @map("request_id")
+  roomCode  String?  @map("room_code")
+  metadata  Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([level, createdAt])
+  @@index([category, event, createdAt])
+  @@index([requestId])
+  @@index([userId, createdAt])
+  @@map("operational_events")
+}

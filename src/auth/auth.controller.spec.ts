@@ -3,8 +3,16 @@ jest.mock('jose', () => ({
   jwtVerify: jest.fn(),
 }));
 
+import {
+  CallHandler,
+  ExecutionContext,
+  INestApplication,
+  Injectable,
+  NestInterceptor,
+  ValidationPipe,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Observable } from 'rxjs';
 import request from 'supertest';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -17,8 +25,27 @@ import { AllExceptionsFilter, HttpExceptionFilter } from '../common/filter/http-
 import { AuthResponseMessage } from '../common/enum/reponse-message.enum';
 import { AuthExceptionMessage } from '../common/exception/exception.message';
 import { UnauthorizedException } from '../common/exception/custom.exception';
+import { OperationalEventService } from '../common/operational-event/operational-event.service';
+import { getRequestContext, type RequestContextStore } from '../common/context/request-context';
+import { RequestContextMiddleware } from '../common/middleware/request-context.middleware';
 
 const TEST_SECRET = 'test-jwt-secret';
+
+/**
+ * 가드 통과 직후(컨트롤러 진입 직전) request context 스냅샷을 캡처하는 테스트 전용 인터셉터.
+ * `JwtAuthGuard.handleRequest()`가 setContextUserId()를 호출해 컨텍스트에
+ * userId/actorType을 채워 넣는지 — 즉 "인증된 일반 유저 요청 후 컨텍스트에 userId가
+ * 포함되는지"를 검증하기 위한 용도. (가드 → 인터셉터 → 컨트롤러 순으로 실행됨)
+ */
+const capturedContexts: Array<RequestContextStore | undefined> = [];
+
+@Injectable()
+class ContextCaptureInterceptor implements NestInterceptor {
+  intercept(_context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    capturedContexts.push(getRequestContext());
+    return next.handle();
+  }
+}
 
 describe('AuthController (integration)', () => {
   let app: INestApplication;
@@ -34,6 +61,8 @@ describe('AuthController (integration)', () => {
   // AuthService의 verifyOAuthToken을 spy로 교체 (외부 네트워크 호출 없이 테스트)
   let authService: AuthService;
 
+  const mockOperationalEvents = { record: jest.fn().mockResolvedValue(undefined) };
+
   beforeAll(async () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [
@@ -46,11 +75,18 @@ describe('AuthController (integration)', () => {
         JwtStrategy,
         { provide: UserRepository, useValue: mockUserRepo },
         { provide: ConfigService, useValue: { get: () => TEST_SECRET } },
+        { provide: OperationalEventService, useValue: mockOperationalEvents },
       ],
     }).compile();
 
     app = moduleRef.createNestApplication();
+    // request context(AsyncLocalStorage)가 실제 런타임처럼 채워지도록 미들웨어 등록
+    // (이게 없으면 JwtAuthGuard.handleRequest()의 setContextUserId() 호출이
+    //  활성 store가 없어 아무 효과도 내지 못하고, getRequestContext()가 undefined를 반환함)
+    const requestContextMiddleware = new RequestContextMiddleware();
+    app.use((req: any, res: any, next: any) => requestContextMiddleware.use(req, res, next));
     app.useGlobalFilters(new AllExceptionsFilter(), new HttpExceptionFilter());
+    app.useGlobalInterceptors(new ContextCaptureInterceptor());
     app.useGlobalPipes(
       new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
     );
@@ -61,7 +97,10 @@ describe('AuthController (integration)', () => {
   });
 
   afterAll(() => app.close());
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    capturedContexts.length = 0;
+  });
 
   /* ────────────────────────────────────────────────────────── */
   describe('POST /auth/oauth — 기존 유저 로그인', () => {
@@ -213,6 +252,13 @@ describe('AuthController (integration)', () => {
       expect(res.status).toBe(200);
       expect(res.body.message).toBe(AuthResponseMessage.LOGOUT_SUCCESS);
       expect(mockUserRepo.updateRefreshToken).toHaveBeenCalledWith(1, null);
+
+      // JwtAuthGuard.handleRequest()가 setContextUserId()를 호출해
+      // request context에 userId/actorType='user'를 반영했는지 검증
+      // (구조화 로그·OperationalEvent의 actor 추적 근거가 되는 핵심 동작)
+      expect(capturedContexts).toHaveLength(1);
+      expect(capturedContexts[0]).toMatchObject({ userId: 1, actorType: 'user' });
+      expect(capturedContexts[0]?.adminRole).toBeUndefined();
     });
 
     it('401 - 토큰 없음', async () => {

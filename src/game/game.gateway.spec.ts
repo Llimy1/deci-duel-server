@@ -22,6 +22,7 @@ import { GameGateway } from './game.gateway';
 import { GameRoomStore } from './game-room.store';
 import { UserRepository } from '../user/user.repository';
 import { R2StorageService } from '../storage/r2-storage.service';
+import { OperationalEventService } from '../common/operational-event/operational-event.service';
 
 /* ──────────────── 공통 설정 ──────────────── */
 
@@ -57,6 +58,8 @@ describe('GameGateway (integration)', () => {
     getSignedDownloadUrl: jest.fn().mockResolvedValue(null),
   };
 
+  const mockOperationalEvents = { record: jest.fn().mockResolvedValue(undefined) };
+
   /* ── 앱 부트스트랩 ── */
   beforeAll(async () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
@@ -67,6 +70,7 @@ describe('GameGateway (integration)', () => {
         { provide: UserRepository, useValue: mockUserRepo },
         { provide: ConfigService, useValue: { get: () => TEST_SECRET } },
         { provide: R2StorageService, useValue: mockR2Storage },
+        { provide: OperationalEventService, useValue: mockOperationalEvents },
       ],
     }).compile();
 

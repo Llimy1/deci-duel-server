@@ -36,6 +36,8 @@ export class GameRoomStore {
       micReady: new Map(),
       prepareTimer: null,
       ttlTimer: null,
+      countdownTimer: null,
+      postRoundTimer: null,
       officialRoundStarted: false,
       prepareDeadlineAt: null,
       createdAt: new Date(),
@@ -76,5 +78,20 @@ export class GameRoomStore {
   getRoomByUserId(userId: number): GameRoom | undefined {
     const roomCode = this.userToRoom.get(userId);
     return roomCode ? this.rooms.get(roomCode) : undefined;
+  }
+
+  /** Admin health endpoint용 인메모리 게임 상태 스냅샷 */
+  getStats(): { roomCount: number; connectedSocketCount: number; activePlayerCount: number } {
+    let activePlayerCount = 0;
+    for (const room of this.rooms.values()) {
+      for (const player of room.players.values()) {
+        if (player.connected) activePlayerCount += 1;
+      }
+    }
+    return {
+      roomCount: this.rooms.size,
+      connectedSocketCount: this.socketToRoom.size,
+      activePlayerCount,
+    };
   }
 }

@@ -15,6 +15,7 @@ import { GameRoomStore } from './game-room.store';
 import { GameRoom, GameState, PlayerInfo } from './types/game.types';
 import { UserRepository } from '../user/user.repository';
 import { R2StorageService } from '../storage/r2-storage.service';
+import { OperationalEventService } from '../common/operational-event/operational-event.service';
 
 /** Room TTL after game_over / rematch_waiting: 10 minutes */
 const ROOM_TTL_MS = 10 * 60 * 1000;
@@ -45,6 +46,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly configService: ConfigService,
     private readonly userRepository: UserRepository,
     private readonly r2Storage: R2StorageService,
+    private readonly operationalEvents: OperationalEventService,
   ) {}
 
   /* ─────────────────────────── Connection lifecycle ─────────────────────── */
@@ -53,23 +55,43 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const token = client.handshake?.auth?.token as string | undefined;
     if (!token) {
       client.disconnect();
+      await this.operationalEvents.record({
+        level: 'warn',
+        category: 'socket',
+        event: 'socket_connect_rejected',
+        message: '소켓 연결 거부 (토큰 없음)',
+        metadata: { reason: 'missing_token' },
+      });
       return;
     }
 
     try {
-      const payload = this.jwtService.verify<{ sub: number; nickname: string }>(
-        token,
-        { secret: this.configService.get<string>('JWT_SECRET') },
-      );
+      const payload = this.jwtService.verify<{ sub: number; nickname: string }>(token, {
+        secret: this.configService.get<string>('JWT_SECRET'),
+      });
       client.data.userId = payload.sub;
       client.data.nickname = payload.nickname;
     } catch {
       client.disconnect();
+      await this.operationalEvents.record({
+        level: 'warn',
+        category: 'socket',
+        event: 'socket_connect_rejected',
+        message: '소켓 연결 거부 (토큰 검증 실패)',
+        metadata: { reason: 'invalid_token' },
+      });
       return;
     }
 
     const userId = client.data.userId as number;
     this.logger.log(`connected  userId=${userId}  socket=${client.id}`);
+    await this.operationalEvents.record({
+      level: 'info',
+      category: 'socket',
+      event: 'socket_connected',
+      message: '소켓 연결 성공',
+      userId,
+    });
 
     await this.tryReconnect(client, userId);
   }
@@ -81,6 +103,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.log(`disconnected  userId=${userId}  socket=${client.id}`);
 
     const room = this.store.getRoomBySocketId(client.id);
+    void this.operationalEvents.record({
+      level: 'info',
+      category: 'socket',
+      event: 'socket_disconnected',
+      message: '소켓 연결 종료',
+      userId,
+      roomCode: room?.roomCode ?? null,
+    });
     this.store.removeSocket(client.id);
 
     if (!room) return;
@@ -125,9 +155,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     player.disconnectTimer = setTimeout(() => {
-      this.handleForfeit(room, userId).catch(err =>
-        this.logger.error('handleForfeit error', err),
-      );
+      this.handleForfeit(room, userId).catch((err) => this.logger.error('handleForfeit error', err));
     }, FORFEIT_GRACE_MS);
   }
 
@@ -183,15 +211,22 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const myScore = room.scores.get(userId) ?? 0;
     const oppScore = opponentId !== null ? (room.scores.get(opponentId) ?? 0) : 0;
 
-    const roundResults = room.roundRecords.map(r => ({
+    const roundResults = room.roundRecords.map((r) => ({
       round: r.round,
       myDb: r.submissions[userId] ?? 0,
       oppDb: opponentId !== null ? (r.submissions[opponentId] ?? 0) : 0,
     }));
 
-    const opponentImageUrl = opponentInfo
-      ? await this.getProfileImageUrl(opponentInfo.profileImageKey)
-      : null;
+    const opponentImageUrl = opponentInfo ? await this.getProfileImageUrl(opponentInfo.profileImageKey) : null;
+
+    await this.operationalEvents.record({
+      level: 'info',
+      category: 'socket',
+      event: 'socket_reconnected',
+      message: '게임 중 재연결 성공',
+      userId,
+      roomCode: room.roomCode,
+    });
 
     client.emit('room:reconnected', {
       roomCode: room.roomCode,
@@ -231,12 +266,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (this.store.getRoomByUserId(userId)) {
       client.emit('error', { message: '이미 방에 참여 중입니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_create_failed',
+        message: '방 생성 실패 (이미 참여 중)',
+        userId,
+        metadata: { reason: 'already_in_room' },
+      });
       return;
     }
 
     const profile = await this.userRepository.findProfileByUserId(userId);
     if (!profile) {
       client.emit('error', { message: '사용자를 찾을 수 없습니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_create_failed',
+        message: '방 생성 실패 (사용자 없음)',
+        userId,
+        metadata: { reason: 'profile_not_found' },
+      });
       return;
     }
 
@@ -266,26 +317,49 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.emit('room:created', { roomCode });
 
     this.logger.log(`room created  code=${roomCode}  host=${userId}`);
+    void this.operationalEvents.record({
+      level: 'info',
+      category: 'game',
+      event: 'room_created',
+      message: '방 생성 성공',
+      userId,
+      roomCode,
+    });
   }
 
   /* ─────────────────────────── Event: room:join ──────────────────────────── */
 
   @SubscribeMessage('room:join')
-  async onRoomJoin(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomCode: string },
-  ) {
+  async onRoomJoin(@ConnectedSocket() client: Socket, @MessageBody() data: { roomCode: string }) {
     const userId = client.data.userId as number;
     const roomCode = (data?.roomCode ?? '').toUpperCase().trim();
 
     if (this.store.getRoomByUserId(userId)) {
       client.emit('error', { message: '이미 방에 참여 중입니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_join_failed',
+        message: '방 참가 실패 (이미 참여 중)',
+        userId,
+        roomCode,
+        metadata: { reason: 'already_in_room' },
+      });
       return;
     }
 
     const room = this.store.getRoom(roomCode);
     if (!room) {
       client.emit('error', { message: '존재하지 않는 방 코드입니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_join_failed',
+        message: '방 참가 실패 (존재하지 않는 방)',
+        userId,
+        roomCode,
+        metadata: { reason: 'room_not_found' },
+      });
       return;
     }
 
@@ -293,12 +367,30 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const activeStates: GameState[] = ['countdown', 'preparing', 'playing', 'round_end'];
     if ((activeStates as string[]).includes(room.state)) {
       client.emit('error', { message: '이미 게임이 시작된 방입니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_join_failed',
+        message: '방 참가 실패 (게임 진행 중)',
+        userId,
+        roomCode,
+        metadata: { reason: 'game_in_progress' },
+      });
       return;
     }
 
     // 방이 가득 찬 경우: 입장 불가
     if (room.players.size >= 2) {
       client.emit('error', { message: '방이 가득 찼습니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_join_failed',
+        message: '방 참가 실패 (방 가득 참)',
+        userId,
+        roomCode,
+        metadata: { reason: 'room_full' },
+      });
       return;
     }
 
@@ -316,6 +408,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const profile = await this.userRepository.findProfileByUserId(userId);
     if (!profile) {
       client.emit('error', { message: '사용자를 찾을 수 없습니다.' });
+      void this.operationalEvents.record({
+        level: 'warn',
+        category: 'game',
+        event: 'room_join_failed',
+        message: '방 참가 실패 (사용자 없음)',
+        userId,
+        roomCode,
+        metadata: { reason: 'profile_not_found' },
+      });
       return;
     }
 
@@ -373,6 +474,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     this.logger.log(`room joined  code=${roomCode}  guest=${userId}`);
+    void this.operationalEvents.record({
+      level: 'info',
+      category: 'game',
+      event: 'room_joined',
+      message: '방 참가 성공',
+      userId,
+      roomCode,
+    });
   }
 
   /* ─────────────────────────── Event: game:ready ─────────────────────────── */
@@ -402,7 +511,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.emitToPlayer(room, opponentId, 'opponent:ready', {});
     }
 
-    const allReady = [...room.players.values()].every(p => p.isReady);
+    const allReady = [...room.players.values()].every((p) => p.isReady);
     if (allReady) {
       room.state = 'countdown';
       this.startCountdown(room);
@@ -412,10 +521,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /* ─────────────────────────── Event: round:submit ───────────────────────── */
 
   @SubscribeMessage('round:submit')
-  onRoundSubmit(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { round: number; peakDb: number },
-  ) {
+  onRoundSubmit(@ConnectedSocket() client: Socket, @MessageBody() data: { round: number; peakDb: number }) {
     const userId = client.data.userId as number;
     const room = this.store.getRoomByUserId(userId);
 
@@ -429,9 +535,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     player.roundSubmissions[round] = Math.max(0, Math.min(200, Number(peakDb) || 0));
 
-    const allSubmitted = [...room.players.values()].every(
-      p => p.roundSubmissions[round] !== undefined,
-    );
+    const allSubmitted = [...room.players.values()].every((p) => p.roundSubmissions[round] !== undefined);
 
     if (allSubmitted) {
       if (room.roundTimer) {
@@ -445,10 +549,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /* ─────────────────────────── Event: round:db ───────────────────────────── */
 
   @SubscribeMessage('round:db')
-  onRoundDb(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { round: number; db: number },
-  ): void {
+  onRoundDb(@ConnectedSocket() client: Socket, @MessageBody() data: { round: number; db: number }): void {
     const userId = client.data.userId as number;
     const room = this.store.getRoomBySocketId(client.id);
 
@@ -506,10 +607,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /* ───────────────────────── Event: round:mic-ready ────────────────────── */
 
   @SubscribeMessage('round:mic-ready')
-  onRoundMicReady(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { round: number },
-  ): void {
+  onRoundMicReady(@ConnectedSocket() client: Socket, @MessageBody() data: { round: number }): void {
     const userId = client.data.userId as number;
     const room = this.store.getRoomByUserId(userId);
     if (!room || room.state !== 'preparing') return;
@@ -528,9 +626,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     // 양쪽 모두 ready 확인
-    const allReady = [...room.players.keys()].every(
-      pid => room.micReady.get(pid) === round,
-    );
+    const allReady = [...room.players.keys()].every((pid) => room.micReady.get(pid) === round);
 
     if (allReady) {
       if (room.prepareTimer) {
@@ -544,18 +640,22 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /* ───────────────────────── Event: round:mic-error ─────────────────────── */
 
   @SubscribeMessage('round:mic-error')
-  onRoundMicError(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { round: number; reason?: string },
-  ): void {
+  onRoundMicError(@ConnectedSocket() client: Socket, @MessageBody() data: { round: number; reason?: string }): void {
     const userId = client.data.userId as number;
     const room = this.store.getRoomByUserId(userId);
     if (!room || room.state !== 'preparing') return;
     if ((data?.round ?? -1) !== room.currentRound) return;
 
-    this.logger.warn(
-      `round:mic-error  code=${room.roomCode}  userId=${userId}  reason=${data?.reason ?? 'unknown'}`,
-    );
+    this.logger.warn(`round:mic-error  code=${room.roomCode}  userId=${userId}  reason=${data?.reason ?? 'unknown'}`);
+    void this.operationalEvents.record({
+      level: 'warn',
+      category: 'game',
+      event: 'round_mic_error',
+      message: '라운드 준비 중 마이크 오류',
+      userId,
+      roomCode: room.roomCode,
+      metadata: { round: room.currentRound, reason: data?.reason ?? 'unknown' },
+    });
 
     if (room.prepareTimer) {
       clearTimeout(room.prepareTimer);
@@ -574,9 +674,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.emitToPlayer(room, opponentId, 'opponent:mic-error', {});
     }
 
-    this.handleForfeit(room, userId).catch(err =>
-      this.logger.error('handleForfeit on mic-error', err),
-    );
+    this.handleForfeit(room, userId).catch((err) => this.logger.error('handleForfeit on mic-error', err));
   }
 
   /* ─────────────────────────── Event: room:leave ────────────────────────── */
@@ -625,9 +723,23 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         room.micReady.clear();
         room.officialRoundStarted = false;
         room.prepareDeadlineAt = null;
-        if (room.roundTimer) { clearTimeout(room.roundTimer); room.roundTimer = null; }
-        if (room.ttlTimer) { clearTimeout(room.ttlTimer); room.ttlTimer = null; }
-        room.players.forEach(p => {
+        if (room.roundTimer) {
+          clearTimeout(room.roundTimer);
+          room.roundTimer = null;
+        }
+        if (room.ttlTimer) {
+          clearTimeout(room.ttlTimer);
+          room.ttlTimer = null;
+        }
+        if (room.countdownTimer) {
+          clearTimeout(room.countdownTimer);
+          room.countdownTimer = null;
+        }
+        if (room.postRoundTimer) {
+          clearTimeout(room.postRoundTimer);
+          room.postRoundTimer = null;
+        }
+        room.players.forEach((p) => {
           p.isReady = false;
           p.wantsRematch = false;
           p.roundSubmissions = {};
@@ -643,8 +755,26 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
             roomCode: room.roomCode,
           });
           this.logger.log(`host transferred  code=${room.roomCode}  newHost=${remaining.userId}`);
+          void this.operationalEvents.record({
+            level: 'info',
+            category: 'game',
+            event: 'room_host_transferred',
+            message: '방장 위임',
+            userId: remaining.userId,
+            roomCode: room.roomCode,
+            metadata: { previousHostUserId: userId },
+          });
         } else {
           this.emitToPlayer(room, remaining.userId, 'opponent:left', {});
+          void this.operationalEvents.record({
+            level: 'info',
+            category: 'game',
+            event: 'opponent_left',
+            message: '상대방 퇴장 (설정 단계)',
+            userId,
+            roomCode: room.roomCode,
+            metadata: { remainingUserId: remaining.userId },
+          });
         }
         return;
       }
@@ -655,9 +785,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       room.players.delete(userId);
       client.leave(room.roomCode);
 
-      this.handleForfeit(room, userId).catch(err =>
-        this.logger.error('handleForfeit on room:leave error', err),
-      );
+      this.handleForfeit(room, userId).catch((err) => this.logger.error('handleForfeit on room:leave error', err));
       return;
     }
 
@@ -683,12 +811,25 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     room.scores.clear();
     room.roundRecords = [];
     room.micReady.clear();
-    if (room.prepareTimer) { clearTimeout(room.prepareTimer); room.prepareTimer = null; }
+    if (room.prepareTimer) {
+      clearTimeout(room.prepareTimer);
+      room.prepareTimer = null;
+    }
     if (room.ttlTimer) {
       clearTimeout(room.ttlTimer);
       room.ttlTimer = null;
     }
-    room.players.forEach(p => {
+    // 진행 중이던 countdown/round_end 지연 콜백도 함께 끊는다 (waiting으로
+    // 되돌아가는 시점에 과거 단계의 타이머가 살아있으면 안 된다).
+    if (room.countdownTimer) {
+      clearTimeout(room.countdownTimer);
+      room.countdownTimer = null;
+    }
+    if (room.postRoundTimer) {
+      clearTimeout(room.postRoundTimer);
+      room.postRoundTimer = null;
+    }
+    room.players.forEach((p) => {
       p.isReady = false;
       p.wantsRematch = false;
       p.roundSubmissions = {};
@@ -708,9 +849,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         roomCode: room.roomCode,
       });
       this.logger.log(`host transferred  code=${room.roomCode}  newHost=${remaining.userId}`);
+      void this.operationalEvents.record({
+        level: 'info',
+        category: 'game',
+        event: 'room_host_transferred',
+        message: '방장 위임',
+        userId: remaining.userId,
+        roomCode: room.roomCode,
+        metadata: { previousHostUserId: userId },
+      });
     } else {
       // 게스트가 나감 → 기존 방장 유지, 상대 떠남 알림
       this.emitToPlayer(room, remaining.userId, 'opponent:left', {});
+      void this.operationalEvents.record({
+        level: 'info',
+        category: 'game',
+        event: 'opponent_left',
+        message: '상대방 퇴장 (대기 단계)',
+        userId,
+        roomCode: room.roomCode,
+        metadata: { remainingUserId: remaining.userId },
+      });
     }
   }
 
@@ -720,16 +879,22 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     let count = 3;
     this.server.to(room.roomCode).emit('round:countdown', { count });
 
+    // 매 단계마다 room.countdownTimer를 최신 handle로 갱신해둬야
+    // cleanupRoom()에서 체인 중간에 끊을 수 있다 (그렇지 않으면 방이
+    // 사라진 뒤에도 tick → prepareRound 콜백이 살아남아 leak이 된다).
     const tick = () => {
       count--;
       this.server.to(room.roomCode).emit('round:countdown', { count });
       if (count > 0) {
-        setTimeout(tick, 1000);
+        room.countdownTimer = setTimeout(tick, 1000);
       } else {
-        setTimeout(() => this.prepareRound(room), 500);
+        room.countdownTimer = setTimeout(() => {
+          room.countdownTimer = null;
+          this.prepareRound(room);
+        }, 500);
       }
     };
-    setTimeout(tick, 1000);
+    room.countdownTimer = setTimeout(tick, 1000);
   }
 
   /** Countdown 종료 후 호출. round:prepare broadcast + prepare timeout 시작 */
@@ -752,9 +917,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (room.state !== 'preparing') return;
       this.logger.warn(`prepare timeout  code=${room.roomCode}  round=${room.currentRound}`);
 
-      const notReadyIds = [...room.players.keys()].filter(
-        pid => room.micReady.get(pid) !== room.currentRound,
-      );
+      const notReadyIds = [...room.players.keys()].filter((pid) => room.micReady.get(pid) !== room.currentRound);
 
       if (notReadyIds.length === 0) {
         // stale timer — 이미 양쪽 모두 ready, 아무것도 하지 않음
@@ -777,9 +940,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         if (oppId !== null) {
           this.emitToPlayer(room, oppId, 'opponent:mic-error', {});
         }
-        this.handleForfeit(room, notReadyId).catch(err =>
-          this.logger.error('handleForfeit on prepare timeout', err),
-        );
+        this.handleForfeit(room, notReadyId).catch((err) => this.logger.error('handleForfeit on prepare timeout', err));
       } else {
         // 공식 라운드 이후 양쪽 모두 미준비 → technical abort (draw)
         this.emitTechnicalAbort(room);
@@ -850,14 +1011,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     if (round >= room.totalRounds) {
-      setTimeout(() => {
-        this.finishGame(room).catch(err =>
-          this.logger.error('finishGame error', err),
-        );
+      room.postRoundTimer = setTimeout(() => {
+        room.postRoundTimer = null;
+        this.finishGame(room).catch((err) => this.logger.error('finishGame error', err));
       }, 1500);
     } else {
       room.state = 'countdown';
-      setTimeout(() => this.startCountdown(room), 2000);
+      room.postRoundTimer = setTimeout(() => {
+        room.postRoundTimer = null;
+        this.startCountdown(room);
+      }, 2000);
     }
   }
 
@@ -871,11 +1034,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const score1 = room.scores.get(p1.userId) ?? 0;
     const score2 = room.scores.get(p2.userId) ?? 0;
 
-    const winner: number | null =
-      score1 > score2 ? p1.userId : score2 > score1 ? p2.userId : null;
+    const winner: number | null = score1 > score2 ? p1.userId : score2 > score1 ? p2.userId : null;
 
     const buildRounds = (myId: number, oppId: number) =>
-      room.roundRecords.map(r => ({
+      room.roundRecords.map((r) => ({
         round: r.round,
         myDb: r.submissions[myId] ?? 0,
         oppDb: r.submissions[oppId] ?? 0,
@@ -895,6 +1057,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       rounds: buildRounds(p2.userId, p1.userId),
     });
 
+    void this.operationalEvents.record({
+      level: 'info',
+      category: 'game',
+      event: 'game_over',
+      message: '게임 종료',
+      roomCode: room.roomCode,
+      metadata: {
+        winnerUserId: winner,
+        scores: { [p1.userId]: score1, [p2.userId]: score2 },
+        totalRounds: room.totalRounds,
+      },
+    });
+
     // Keep room alive for rematch — TTL will clean it up if unused
     this.refreshTTL(room);
   }
@@ -902,9 +1077,25 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private async handleForfeit(room: GameRoom, forfeitUserId: number) {
     if (room.state === 'game_over') return;
 
+    // forfeit은 playing/preparing/countdown/round_end 등 다양한 단계에서 트리거될 수 있다.
+    // game_over로 전이하기 전에 어느 단계의 진행 타이머든 모두 끊어야
+    // (그렇지 않으면 이전 단계의 콜백이 살아남아 죽은 방을 향해 emit을 시도하거나,
+    //  테스트 환경에서 Jest open-handle의 원인이 된다)
     if (room.roundTimer) {
       clearTimeout(room.roundTimer);
       room.roundTimer = null;
+    }
+    if (room.prepareTimer) {
+      clearTimeout(room.prepareTimer);
+      room.prepareTimer = null;
+    }
+    if (room.countdownTimer) {
+      clearTimeout(room.countdownTimer);
+      room.countdownTimer = null;
+    }
+    if (room.postRoundTimer) {
+      clearTimeout(room.postRoundTimer);
+      room.postRoundTimer = null;
     }
 
     room.state = 'game_over';
@@ -918,11 +1109,24 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const opponentScore = room.scores.get(opponentId) ?? 0;
     const forfeitScore = room.scores.get(forfeitUserId) ?? 0;
 
+    void this.operationalEvents.record({
+      level: 'warn',
+      category: 'game',
+      event: 'game_forfeited',
+      message: '플레이어 기권 처리',
+      userId: forfeitUserId,
+      roomCode: room.roomCode,
+      metadata: {
+        opponentUserId: opponentId,
+        scores: { [forfeitUserId]: forfeitScore, [opponentId]: opponentScore },
+      },
+    });
+
     this.emitToPlayer(room, opponentId, 'game:over', {
       result: 'win',
       myScore: opponentScore,
       oppScore: forfeitScore,
-      rounds: room.roundRecords.map(r => ({
+      rounds: room.roundRecords.map((r) => ({
         round: r.round,
         myDb: r.submissions[opponentId] ?? 0,
         oppDb: r.submissions[forfeitUserId] ?? 0,
@@ -968,7 +1172,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       clearTimeout(room.prepareTimer);
       room.prepareTimer = null;
     }
-    room.players.forEach(p => {
+    if (room.countdownTimer) {
+      clearTimeout(room.countdownTimer);
+      room.countdownTimer = null;
+    }
+    if (room.postRoundTimer) {
+      clearTimeout(room.postRoundTimer);
+      room.postRoundTimer = null;
+    }
+    room.players.forEach((p) => {
       p.isReady = false;
       p.wantsRematch = false;
       p.roundSubmissions = {};
@@ -1024,9 +1236,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       resetTo: 'match_ready',
       message,
     });
-    this.logger.log(
-      `match:prepare-failed  code=${room.roomCode}  failedUserIds=${failedUserIds.join(',')}`,
-    );
+    this.logger.log(`match:prepare-failed  code=${room.roomCode}  failedUserIds=${failedUserIds.join(',')}`);
+    void this.operationalEvents.record({
+      level: 'warn',
+      category: 'game',
+      event: 'match_prepare_failed',
+      message: '대결 준비 실패 (마이크 미준비)',
+      roomCode: room.roomCode,
+      metadata: { failedUserIds, round: room.currentRound },
+    });
     // room을 ready 상태로 초기화 (players 유지)
     this.resetGameData(room);
   }
@@ -1036,6 +1254,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * game:over (draw) + cleanupRoom.
    */
   private emitTechnicalAbort(room: GameRoom): void {
+    void this.operationalEvents.record({
+      level: 'warn',
+      category: 'game',
+      event: 'game_over',
+      message: '게임 종료 (기술적 중단 — 양측 마이크 미준비)',
+      roomCode: room.roomCode,
+      metadata: { reason: 'all_mic_prepare_failed', round: room.currentRound },
+    });
+
     const players = [...room.players.values()];
     for (const player of players) {
       const oppId = this.getOpponentId(room, player.userId);
@@ -1045,7 +1272,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         result: 'draw',
         myScore,
         oppScore,
-        rounds: room.roundRecords.map(r => ({
+        rounds: room.roundRecords.map((r) => ({
           round: r.round,
           myDb: r.submissions[player.userId] ?? 0,
           oppDb: oppId !== null ? (r.submissions[oppId] ?? 0) : 0,
@@ -1066,11 +1293,23 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       clearTimeout(room.prepareTimer);
       room.prepareTimer = null;
     }
+    // countdown tick 체인 / round_end 이후 지연 콜백(finishGame, startCountdown)도
+    // 반드시 끊어야 한다. 끊지 않으면 방이 store에서 사라진 뒤에도 setTimeout 콜백이
+    // 살아남아 (production에선 무해하지만) 테스트 환경에서 Jest open-handle
+    // ("worker process failed to exit gracefully") 경고의 원인이 된다.
+    if (room.countdownTimer) {
+      clearTimeout(room.countdownTimer);
+      room.countdownTimer = null;
+    }
+    if (room.postRoundTimer) {
+      clearTimeout(room.postRoundTimer);
+      room.postRoundTimer = null;
+    }
     if (room.ttlTimer) {
       clearTimeout(room.ttlTimer);
       room.ttlTimer = null;
     }
-    room.players.forEach(p => {
+    room.players.forEach((p) => {
       if (p.disconnectTimer) {
         clearTimeout(p.disconnectTimer);
         p.disconnectTimer = null;

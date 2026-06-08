@@ -47,6 +47,18 @@ export interface GameRoom {
   prepareTimer: ReturnType<typeof setTimeout> | null;
   /** TTL timer: auto-cleanup idle rooms after game_over / rematch_waiting */
   ttlTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * Countdown 진행용 타이머 (3-2-1 tick 체인 + prepareRound로 넘어가는 마지막 setTimeout).
+   * recursive하게 재발급되므로 매 tick마다 최신 handle로 갱신해야 cleanupRoom에서 끊을 수 있다.
+   */
+  countdownTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * 라운드 종료 후 다음 단계로 넘어가는 지연 타이머
+   * (round_end → finishGame 1.5s 또는 round_end → startCountdown 2s).
+   * cleanupRoom에서 정리하지 않으면 방이 사라진 뒤에도 콜백이 살아남아
+   * (테스트 환경에서) Jest open-handle 경고의 원인이 된다.
+   */
+  postRoundTimer: ReturnType<typeof setTimeout> | null;
   /** 첫 round:start를 emit했는지. true이면 공식 대결 성립, 실패 시 forfeit 처리 */
   officialRoundStarted: boolean;
   /** prepare window 만료 시각 (Date.now() 기준 ms). 재연결 시 남은 시간 계산용 */

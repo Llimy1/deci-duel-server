@@ -13,5 +13,7 @@ import { StorageModule } from '../storage/storage.module';
     StorageModule,
   ],
   providers: [GameGateway, GameRoomStore, UserRepository],
+  // GameRoomStore: AdminModule의 /admin/health에서 socket room/player count 조회용
+  exports: [GameRoomStore],
 })
 export class GameModule {}
