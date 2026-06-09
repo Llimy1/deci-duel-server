@@ -34,8 +34,9 @@ COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
 COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 
-# Prisma schema (migrate deploy에 필요)
+# Prisma schema + config (migrate deploy에 필요)
 COPY prisma ./prisma
+COPY prisma.config.ts ./
 
 # 시작 시 migrate deploy → 앱 실행 순서를 보장하는 entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/entrypoint.sh
