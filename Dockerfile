@@ -37,8 +37,12 @@ COPY --from=builder /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 # Prisma schema (migrate deploy에 필요)
 COPY prisma ./prisma
 
+# 시작 시 migrate deploy → 앱 실행 순서를 보장하는 entrypoint
+COPY docker-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 EXPOSE 3000
 
-# dumb-init이 node 프로세스의 부모로서 신호를 올바르게 전달
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+# dumb-init → entrypoint(migrate) → node dist/main
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["node", "dist/main"]

@@ -45,14 +45,9 @@ echo ""
 echo "▶ NestJS 이미지 빌드..."
 docker compose -f docker-compose.prod.yml build nestjs
 
+# ─── 서비스 시작 (migrate deploy는 entrypoint에서 자동 실행) ────────
 echo ""
-echo "▶ Prisma 마이그레이션 실행..."
-docker compose -f docker-compose.prod.yml run --rm nestjs \
-    node_modules/.bin/prisma migrate deploy
-
-# ─── 서비스 시작 ────────────────────────────────────────────────────
-echo ""
-echo "▶ 전체 서비스 시작..."
+echo "▶ 전체 서비스 시작 (마이그레이션은 nestjs 시작 시 자동 실행)..."
 docker compose -f docker-compose.prod.yml up -d
 
 echo ""
