@@ -6,6 +6,10 @@ COPY package*.json ./
 RUN npm ci
 
 COPY . .
+# prisma generate는 DB 연결이 불필요하지만 prisma.config.ts를 로드함.
+# 빌드 타임에 DATABASE_URL이 없으면 config가 throw하므로 더미값 주입.
+# production 스테이지에는 영향 없음 (ENV는 스테이지 격리됨).
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
 # Prisma client 생성 (schema.prisma binaryTargets: native + linux-musl-arm64-openssl-3.0.x)
 RUN npx prisma generate
 RUN npm run build
