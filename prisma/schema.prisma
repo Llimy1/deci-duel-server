@@ -2,7 +2,10 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // native: 로컬 개발/빌드 머신
+  // linux-musl-arm64-openssl-3.0.x: EC2 t4g.small (Ubuntu ARM64, Alpine musl)
+  binaryTargets = ["native", "linux-musl-arm64-openssl-3.0.x"]
 }
 
 datasource db {

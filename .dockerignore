@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.env
+.env.*
+!.env.example
+nginx/certbot/conf
+coverage
+*.log
+.DS_Store
+README.md
+docs/
+test/
+.claude/

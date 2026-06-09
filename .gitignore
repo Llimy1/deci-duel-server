@@ -57,6 +57,12 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 /generated/prisma
 
+# Let's Encrypt 인증서 (EC2에서만 생성, 커밋 금지)
+nginx/certbot/conf/*
+!nginx/certbot/conf/.gitkeep
+nginx/certbot/www/*
+!nginx/certbot/www/.gitkeep
+
 # agent communication logs
 /docs/CLAUDE_TO_CODEX.md
 

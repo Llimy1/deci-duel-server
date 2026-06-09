@@ -1,0 +1,52 @@
+# 프로덕션 배포용 Docker Compose (EC2 + RDS)
+# PostgreSQL은 RDS(외부)를 사용하므로 여기서는 포함하지 않음
+#
+# 최초 배포:  ./init-ssl.sh
+# 이후 업데이트: ./deploy.sh
+#
+# 환경변수: .env 파일 필수 (.env.example 참고)
+#   DATABASE_URL — RDS PostgreSQL 연결 문자열
+#   CORS_ALLOWED_ORIGINS — 허용 오리진 (https://deciduel.com,https://www.deciduel.com)
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: deci-duel-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certbot/conf:/etc/letsencrypt:ro
+      - ./nginx/certbot/www:/var/www/certbot:ro
+    depends_on:
+      - nestjs
+
+  certbot:
+    image: certbot/certbot
+    container_name: deci-duel-certbot
+    volumes:
+      - ./nginx/certbot/conf:/etc/letsencrypt
+      - ./nginx/certbot/www:/var/www/certbot
+    # 직접 실행용: docker compose -f docker-compose.prod.yml run --rm certbot <subcommand>
+    # 자동 갱신: crontab (init-ssl.sh에서 등록)
+
+  nestjs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deci-duel-server:latest
+    container_name: deci-duel-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    expose:
+      - "3000"
+    healthcheck:
+      # curl -s -o /dev/null: HTTP 응답이 오면(어떤 상태코드든) exit 0
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
