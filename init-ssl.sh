@@ -1,91 +1,63 @@
 #!/bin/bash
-# SSL 인증서 최초 발급 스크립트 (최초 1회만 실행)
-# 2-phase: Phase 1 (HTTP only nginx) → certbot HTTP-01 → Phase 2 (HTTPS nginx)
+# 최초 서버 시작 스크립트 (최초 1회 실행)
+# Cloudflare Origin Certificate 방식 — Certbot 불필요
 #
-# 실행 전 확인사항:
-#   1. .env 파일 생성 완료 (DATABASE_URL, JWT_SECRET 등)
-#   2. Cloudflare DNS에 api.deciduel.com A 레코드 43.202.20.183 등록 완료
-#   3. EC2 Security Group 80/443 포트 열려 있음
-#   4. docker, docker compose 설치 완료
+# 사전 준비:
+#   1. nginx/certs/origin.pem  — Cloudflare Origin Certificate
+#   2. nginx/certs/origin.key  — 개인 키 (EC2에 SCP로 업로드)
+#   3. .env 파일 생성 완료 (DATABASE_URL, JWT_SECRET 등)
+#   4. Cloudflare DNS: api.deciduel.com → 프록시됨(주황 구름)
+#   5. Cloudflare SSL/TLS 모드: Full (Strict)
 
 set -e
 
-DOMAIN="api.deciduel.com"
-EMAIL="llimy.mh@gmail.com"
-
 echo "══════════════════════════════════════════"
-echo " DeciDuel Server SSL Bootstrap"
-echo " Domain: $DOMAIN"
+echo " DeciDuel Server 최초 시작"
 echo "══════════════════════════════════════════"
 
-# ─── Phase 1: HTTP-only nginx 시작 ───────────────────────────────
+# ─── 인증서 파일 확인 ────────────────────────────────────────────
 echo ""
-echo "▶ Phase 1: HTTP-only nginx 시작..."
+echo "▶ Cloudflare Origin Certificate 확인..."
 
-# conf.d에 HTTP-only 설정 배포
-cp nginx/templates/app.http.conf nginx/conf.d/app.conf
-
-# nginx + nestjs 시작 (certbot은 아직)
-docker compose -f docker-compose.prod.yml up -d nginx nestjs
-
-echo "⏳ nginx 준비 대기 (8초)..."
-sleep 8
-
-# nginx 동작 확인
-if ! docker compose -f docker-compose.prod.yml exec nginx nginx -t 2>/dev/null; then
-    echo "❌ nginx 설정 오류. nginx 로그 확인:"
-    docker compose -f docker-compose.prod.yml logs nginx
+if [ ! -f "nginx/certs/origin.pem" ] || [ ! -f "nginx/certs/origin.key" ]; then
+    echo "❌ 인증서 파일이 없습니다."
+    echo "   다음 파일을 nginx/certs/에 배치 후 재시도하세요:"
+    echo "     nginx/certs/origin.pem  (Cloudflare Origin Certificate)"
+    echo "     nginx/certs/origin.key  (개인 키)"
     exit 1
 fi
 
-echo "✅ nginx 정상 동작 확인"
+echo "✅ 인증서 파일 확인 완료"
 
-# ─── Let's Encrypt 인증서 발급 ──────────────────────────────────
+# ─── .env 파일 확인 ────────────────────────────────────────────────
+if [ ! -f ".env" ]; then
+    echo "❌ .env 파일이 없습니다. .env.example을 참고해 생성 후 재시도하세요."
+    exit 1
+fi
+
+# ─── nginx 설정 배포 ───────────────────────────────────────────────
 echo ""
-echo "▶ Let's Encrypt 인증서 발급 중..."
+echo "▶ nginx 설정 배포..."
+cp nginx/templates/app.conf nginx/conf.d/app.conf
 
-docker compose -f docker-compose.prod.yml run --rm certbot certonly \
-    --webroot \
-    --webroot-path=/var/www/certbot \
-    --email "$EMAIL" \
-    --agree-tos \
-    --no-eff-email \
-    -d "$DOMAIN"
-
-echo "✅ 인증서 발급 완료"
-
-# ─── Phase 2: HTTPS 설정으로 전환 ───────────────────────────────
+# ─── DB 마이그레이션 ────────────────────────────────────────────────
 echo ""
-echo "▶ Phase 2: HTTPS 설정으로 전환..."
+echo "▶ NestJS 이미지 빌드..."
+docker compose -f docker-compose.prod.yml build nestjs
 
-cp nginx/templates/app.https.conf nginx/conf.d/app.conf
-
-# nginx 설정 검증
-docker compose -f docker-compose.prod.yml exec nginx nginx -t
-
-# nginx 리로드 (무중단)
-docker compose -f docker-compose.prod.yml exec nginx nginx -s reload
-
-echo "✅ HTTPS 설정 적용 완료"
-
-# ─── 자동 갱신 crontab 등록 ────────────────────────────────────
 echo ""
-echo "▶ SSL 자동 갱신 crontab 등록..."
+echo "▶ Prisma 마이그레이션 실행..."
+docker compose -f docker-compose.prod.yml run --rm nestjs \
+    node_modules/.bin/prisma migrate deploy
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RENEW_CMD="cd $SCRIPT_DIR && docker compose -f docker-compose.prod.yml run --rm certbot renew --quiet && docker compose -f docker-compose.prod.yml exec nginx nginx -s reload >> /var/log/certbot-renew.log 2>&1"
+# ─── 서비스 시작 ────────────────────────────────────────────────────
+echo ""
+echo "▶ 전체 서비스 시작..."
+docker compose -f docker-compose.prod.yml up -d
 
-# 매일 새벽 3시 30분에 갱신 시도
-(crontab -l 2>/dev/null | grep -v "certbot renew"; echo "30 3 * * * $RENEW_CMD") | crontab -
-
-echo "✅ crontab 등록 완료 (매일 03:30 자동 갱신)"
-
-# ─── 완료 ────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════"
-echo "✅ SSL 설정 완료!"
-echo "   https://$DOMAIN 접속 가능"
+echo "✅ 서버 시작 완료!"
 echo ""
-echo "현재 실행 중인 컨테이너:"
 docker compose -f docker-compose.prod.yml ps
 echo "══════════════════════════════════════════"
