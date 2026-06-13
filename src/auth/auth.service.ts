@@ -8,7 +8,8 @@ import {
   ConflictException,
   UnauthorizedException,
 } from '../common/exception/custom.exception';
-import { AuthExceptionMessage } from '../common/exception/exception.message';
+import { AuthExceptionMessage, UserExceptionMessage } from '../common/exception/exception.message';
+import { containsProfanity } from '../common/validation/profanity-filter';
 import type { OAuthProvider } from './dto/request/auth.request';
 import {
   OAuthExistingUserResponse,
@@ -49,6 +50,9 @@ export class AuthService {
     privacyVersion: string,
   ): Promise<OAuthSignupResponse> {
     const { provider, providerId } = this.verifySignupToken(signupToken);
+
+    if (containsProfanity(nickname))
+      throw new BadRequestException(UserExceptionMessage.NICKNAME_CONTAINS_PROFANITY);
 
     const existing = await this.userRepository.findByProvider(provider, providerId);
     if (existing) throw new ConflictException(AuthExceptionMessage.DUPLICATE_ID);

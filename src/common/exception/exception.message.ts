@@ -13,6 +13,7 @@ export enum UserExceptionMessage {
   NICKNAME_REQUIRED = '닉네임을 입력해주세요.',
   NICKNAME_TOO_SHORT = '닉네임은 2자 이상이어야 합니다.',
   NICKNAME_INVALID_CHARS = '닉네임은 한글, 영문, 숫자만 사용할 수 있습니다.',
+  NICKNAME_CONTAINS_PROFANITY = '닉네임에 사용할 수 없는 단어가 포함되어 있습니다.',
   NICKNAME_ALREADY_EXISTS = '이미 사용 중인 닉네임입니다.',
   AVATAR_COLOR_INVALID = '올바른 색상 코드를 입력해주세요. (#RRGGBB)',
   PROFILE_IMAGE_INVALID_TYPE = '이미지 파일만 업로드 가능합니다. (jpeg, png, webp)',

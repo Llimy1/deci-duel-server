@@ -11,6 +11,7 @@ import {
 } from './dto/response/user.response';
 import { BadRequestException, ConflictException, NotFoundException } from '../common/exception/custom.exception';
 import { AuthExceptionMessage, UserExceptionMessage } from '../common/exception/exception.message';
+import { containsProfanity } from '../common/validation/profanity-filter';
 import { R2StorageService } from '../storage/r2-storage.service';
 
 const NICKNAME_PATTERN = /^[가-힣a-zA-Z0-9]+$/;
@@ -85,6 +86,8 @@ export class UserService {
       throw new BadRequestException(UserExceptionMessage.NICKNAME_TOO_SHORT);
     if (!NICKNAME_PATTERN.test(nickname))
       throw new BadRequestException(UserExceptionMessage.NICKNAME_INVALID_CHARS);
+    if (containsProfanity(nickname))
+      throw new BadRequestException(UserExceptionMessage.NICKNAME_CONTAINS_PROFANITY);
 
     const exists = await this.userRepository.existsByNickname(nickname);
     if (exists) throw new ConflictException(UserExceptionMessage.NICKNAME_ALREADY_EXISTS);

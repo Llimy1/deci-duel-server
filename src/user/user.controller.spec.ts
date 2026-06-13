@@ -282,6 +282,18 @@ describe('UserController (integration)', () => {
       expect(res.status).toBe(400);
     });
 
+    it('400 - 비속어 포함 닉네임', async () => {
+      mockUserRepo.existsByNickname.mockResolvedValue(false);
+
+      const res = await request(app.getHttpServer())
+        .patch('/user/me/nickname')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ nickname: '시발닉네임' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe(UserExceptionMessage.NICKNAME_CONTAINS_PROFANITY);
+    });
+
     it('409 - 이미 사용 중인 닉네임', async () => {
       mockUserRepo.existsByNickname.mockResolvedValue(true);
 

@@ -133,6 +133,7 @@ OAuth 신규 유저 회원가입 완료.
 
 **Errors**
 - 401 `signupToken이 유효하지 않습니다` — 만료(15분) 또는 위조
+- 400 `닉네임에 사용할 수 없는 단어가 포함되어 있습니다.` — 비속어/금칙어 포함
 - 409 `이미 가입된 계정입니다`
 
 ---
@@ -270,7 +271,10 @@ OAuth 신규 유저 회원가입 완료.
 **Errors**
 - 400 `닉네임은 2자 이상이어야 합니다.`
 - 400 `닉네임은 한글, 영문, 숫자만 사용할 수 있습니다.`
+- 400 `닉네임에 사용할 수 없는 단어가 포함되어 있습니다.` — 비속어/금칙어 포함
 - 409 `이미 사용 중인 닉네임입니다.`
+
+> **비속어 필터**: `src/common/validation/profanity-filter.ts`의 한글/영문 금칙어 목록 + leetspeak 정규화로 검사. App Store UGC(닉네임이 리더보드/대전에서 다른 유저에게 노출됨) 정책 대응.
 
 ---
 
@@ -352,6 +356,8 @@ OAuth 신규 유저 회원가입 완료.
 ```ts
 { peakDb: number, emoji: string, comment?: string, date: string /* "YYYY-MM-DD" */ }
 ```
+
+**Validation**: `emoji` 최대 16자 (복합/ZWJ 이모지 대응), `comment` 최대 200자
 
 **Response 201**: `{ success: true }`
 
