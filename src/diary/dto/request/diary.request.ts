@@ -15,7 +15,7 @@ export class CreateDiaryRequest {
   peakDb: number;
 
   @IsString()
-  @MaxLength(2, { message: '이모지는 2자 이하여야 합니다.' })
+  @MaxLength(16, { message: '이모지는 16자 이하여야 합니다.' })
   emoji: string;
 
   @IsString()
@@ -39,7 +39,7 @@ export class FindDiaryByDateRequest {
 
 export class UpdateDiaryRequest {
   @IsString()
-  @MaxLength(2, { message: '이모지는 2자 이하여야 합니다.' })
+  @MaxLength(16, { message: '이모지는 16자 이하여야 합니다.' })
   emoji: string;
 
   @IsString()
